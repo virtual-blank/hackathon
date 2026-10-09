@@ -17,6 +17,9 @@ pyjwt = ">=2.13.0"
 sqlalchemy = {version = ">=2.1.1", extras = ["asyncio"]}
 uuid6 = ">=2025.0.1"
 
+[tool.poetry.group.dev.dependencies]
+ruff = "==0.15.18"
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
