@@ -43,6 +43,8 @@ class Habit(Uuid7PkMixin, TimeStampMixin, Base):
     creator: Mapped["User"] = relationship(back_populates="habits")
     logs: Mapped[list["HabitLog"]] = relationship(back_populates="habit")
     shared_habit_user: Mapped["SharedHabitUser"] = relationship(back_populates="habit")
+    reviews: Mapped[list["Review"]] = relationship(back_populates="habit")
+
 
     __table_args__ = (
         CheckConstraint("cardinality(notification_times) <= 3", name="max_3_reminders"),
@@ -91,7 +93,6 @@ class HabitLog(Uuid7PkMixin, TimeStampMixin, Base):
 
     habit: Mapped["Habit"] = relationship(back_populates="logs")
     user: Mapped["User"] = relationship(back_populates="habit_logs")
-    reviews: Mapped[list["Review"]] = relationship(back_populates="habit_log")
 
     __table_args__ = (
         # Одна отметка в день на человека. Покрывает и запросы «все отметки привычки».
