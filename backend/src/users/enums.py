@@ -7,9 +7,7 @@ class Theme(enum.StrEnum):
     SYSTEM = "system"
 
 
-
-
-
-
-
-
+class AvatarContentType(enum.StrEnum):
+    JPEG = "image/jpeg"
+    PNG = "image/png"
+    WEBP = "image/webp"

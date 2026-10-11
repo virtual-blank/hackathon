@@ -4,6 +4,8 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr, field_validator
 
+from src.users.enums import AvatarContentType
+
 
 class UserCreateSchema(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
@@ -47,6 +49,26 @@ class UserOutputSchema(BaseModel):
     email: EmailStr
     telegram_chat_id: int | None = None
     # todo: добавить позже pfp_url: str | None = None | ссылка на фотку профиля (minio)
+
+
+class AvatarUploadCreateSchema(BaseModel):
+    content_type: AvatarContentType
+
+
+class AvatarUploadOutputSchema(BaseModel):
+    upload_url: str
+    key: str
+    content_type: AvatarContentType
+    expires_in_sec: int
+
+
+class AvatarSetSchema(BaseModel):
+    key: Annotated[str, Field(min_length=1, max_length=255)]
+
+
+class AvatarOutputSchema(BaseModel):
+    pfp_url: str
+    expires_in_sec: int
 
 
 class TokenSchema(BaseModel):

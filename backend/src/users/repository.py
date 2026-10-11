@@ -17,3 +17,8 @@ class UsersRepository:
         stmt = select(User).where(User.username == username)
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def update_pfp_key(self, user: User, pfp_key: str | None) -> User:
+        user.pfp_key = pfp_key
+        await self.session.commit()
+        return user

@@ -26,6 +26,9 @@ class User(Uuid7PkMixin, TimeStampMixin, Base):
 
     timezone: Mapped[str] = mapped_column(String(64), server_default="UTC")
 
+    # Ключ файла в хранилище, а не ссылка: presigned URL временный и выдаётся на каждый запрос.
+    pfp_key: Mapped[str | None] = mapped_column(String(255))
+
     # Telegram. chat_id у Telegram числовой и может быть больше int32.
     telegram_chat_id: Mapped[int | None] = mapped_column(BigInteger, unique=True)
     # Одноразовая ссылка привязки t.me/<bot>?start=<token>. В БД только хеш токена.
