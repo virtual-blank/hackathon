@@ -2,8 +2,9 @@ import uuid
 from datetime import date, datetime
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from src.habits.schemas import HabitOutputSchema
+from src.users.pfp.minio import DEFAULT_PFP_URL
 
 
 class ReviewCreateSchema(BaseModel):
@@ -26,7 +27,12 @@ class Reviewer(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     username: str
-    # todo сука pfp_url: str | None = None
+    pfp_url: str
+
+    @field_validator("pfp_url", mode="before")
+    @classmethod
+    def set_default_pfp(cls, v: str | None) -> str:
+        return v or DEFAULT_PFP_URL
 
 
 class ReviewOutputSchema(BaseModel):
