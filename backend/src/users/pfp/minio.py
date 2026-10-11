@@ -1,3 +1,5 @@
+import uuid
+
 import aioboto3
 import botocore
 from botocore.exceptions import ClientError
@@ -8,6 +10,9 @@ MINIO_ENDPOINT = get_minio_settings().endpoint
 BUCKET_NAME = get_minio_settings().bucket_name
 ACCESS_KEY = get_minio_settings().root_user
 SECRET_KEY = get_minio_settings().root_password
+
+PUBLIC_PREFIX = f"{MINIO_ENDPOINT}/{BUCKET_NAME}/"
+DEFAULT_PFP_URL = f"{PUBLIC_PREFIX}defaults/default-pfp.webp"
 
 
 class MinioService:
@@ -24,20 +29,17 @@ class MinioService:
         config = botocore.client.Config(signature_version="s3v4")
         return self.session.client("s3", endpoint_url=self.endpoint_url, config=config)
 
-    async def generate_presigned_upload_url(self, extension: str = "webp"):
-        unique_filename = f"{uuid7().hex}.{extension}"
-        file_key = f"pfp/{unique_filename}"
+    async def generate_presigned_upload_url(self, user_id: uuid.UUID, extension: str = "webp"):
+        file_key = f"pfp/{user_id}/{uuid7().hex}.{extension}"
 
         try:
             async with self._get_client() as s3_client:
                 presigned_url = await s3_client.generate_presigned_url(
                     ClientMethod="put_object",
                     Params={"Bucket": self.bucket_name, "Key": file_key, "ContentType": f"image/{extension}"},
-                    ExpiresIn=300,  # 5 min
+                    ExpiresIn=300,
                 )
-
-                public_url = f"{self.endpoint_url}/{self.bucket_name}/{file_key}"
-
+                public_url = f"{PUBLIC_PREFIX}{file_key}"
                 return {"upload_url": presigned_url, "file_key": file_key, "public_url": public_url}
         except ClientError as e:
             print(f"S3 Presign Error: {e!s}")
