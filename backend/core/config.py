@@ -27,6 +27,14 @@ class JwtSettings(BaseSettings):
     algorithm: str
 
 
+class MinioSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=ENV_FILE, env_prefix="MINIO_", extra="ignore")
+    endpoint: str
+    root_user: str
+    root_password: str
+    secret_key: str
+
+
 @lru_cache
 def get_db_settings() -> PostgresSettings:
     return PostgresSettings()
@@ -35,3 +43,8 @@ def get_db_settings() -> PostgresSettings:
 @lru_cache
 def get_jwt_settings() -> JwtSettings:
     return JwtSettings()
+
+
+@lru_cache
+def get_minio_settings() -> MinioSettings:
+    return MinioSettings
