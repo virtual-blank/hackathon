@@ -214,6 +214,7 @@ class HabitsRepository:
             setattr(habit, field, value)
 
         await self.session.commit()
+        await self.session.refresh(habit)
         return habit
 
     async def delete_habit(self, habit_id: uuid.UUID, creator_id: uuid.UUID) -> bool:

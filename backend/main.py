@@ -13,6 +13,7 @@ from src.feed.models import Review
 from src.users.router import router as users_router
 from src.feed.router import router as feed_router
 from src.users.pfp.router import router as users_pfp_router
+from src.habits.router import router as habits_router
 # == ROUTERS ==
 
 ROUTERS_PREFIX = "/api/v1"
@@ -35,6 +36,7 @@ app.add_middleware(
 app.include_router(users_router, prefix=ROUTERS_PREFIX)
 app.include_router(feed_router, prefix=ROUTERS_PREFIX)
 app.include_router(users_pfp_router, prefix=ROUTERS_PREFIX)
+app.include_router(habits_router, prefix=ROUTERS_PREFIX)
 
 @app.get("/health", tags=["🩺 System"], description="Healthcheck")
 async def health() -> dict[str, str]:
