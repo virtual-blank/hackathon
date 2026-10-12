@@ -1,0 +1,49 @@
+#!/bin/bash
+# Форматирует staged .py-файлы ruff'ом и добавляет результат в этот же коммит.
+# Подключается один раз: `make hooks` (git config core.hooksPath .githooks).
+
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+# При слиянии в индексе лежат файлы влитой ветки — чужой код не переформатируем.
+if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+    exit 0
+fi
+
+# Ruff из .venv проекта напрямую: PyCharm запускает хуки со своим PATH, где poetry может не быть.
+RUFF=backend/.venv/bin/ruff
+if [ ! -x "$RUFF" ]; then
+    echo "pre-commit: ruff не найден — выполни 'make install'" >&2
+    exit 1
+fi
+
+# Только то, что идёт в коммит (добавленные, изменённые, переименованные), а не весь репозиторий.
+STAGED=()
+while IFS= read -r -d '' file; do
+    STAGED+=("$file")
+done < <(git diff --cached --name-only --diff-filter=ACMR -z -- 'backend/*.py')
+
+if [ ${#STAGED[@]} -eq 0 ]; then
+    exit 0
+fi
+
+# Файл, добавленный в коммит частично (git add -p), трогать нельзя: `git add` после
+# форматирования утащил бы в коммит и неготовые куски, оставленные вне его.
+PARTIAL=()
+for file in "${STAGED[@]}"; do
+    if ! git diff --quiet -- "$file"; then
+        PARTIAL+=("$file")
+    fi
+done
+
+if [ ${#PARTIAL[@]} -gt 0 ]; then
+    echo "pre-commit: в этих файлах есть изменения вне коммита — форматирование их смешало бы:" >&2
+    printf '  %s\n' "${PARTIAL[@]}" >&2
+    echo "Добавь файлы целиком (git add) или отложи лишнее (git stash --keep-index) и повтори." >&2
+    exit 1
+fi
+
+# --force-exclude: исключения из backend/ruff.toml (миграции) действуют и на явно переданные файлы.
+"$RUFF" format --force-exclude "${STAGED[@]}"
+git add -- "${STAGED[@]}"

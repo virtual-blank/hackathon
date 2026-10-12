@@ -19,6 +19,9 @@ uuid6 = ">=2025.0.1"
 aioboto3 = "^15.5.0"
 tzdata = "^2026.5"
 
+[tool.poetry.group.dev.dependencies]
+ruff = "==0.15.18"
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"

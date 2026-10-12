@@ -34,10 +34,12 @@ class MinioSettings(BaseSettings):
     root_user: str
     root_password: str
     bucket_name: str
-    
+    protocol: str = "http"
+    ttl_link_sec: int = 300
+
     @property
     def endpoint(self) -> str:
-        return f"http://{self.host}:{self.port}"
+        return f"{self.protocol}://{self.host}:{self.port}"
 
 
 @lru_cache

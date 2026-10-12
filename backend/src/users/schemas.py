@@ -1,22 +1,22 @@
+import string
 import uuid
 from datetime import datetime
 from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr, field_validator
+
 from src.users.pfp.minio import DEFAULT_PFP_URL
 
 
 class UserCreateSchema(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
-    username: Annotated[str, Field(min_length=5, max_length=16)]
+    username: Annotated[str, Field(min_length=5, max_length=16, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")]
     password: SecretStr
     email: EmailStr
 
     @field_validator("username")
     @classmethod
-    def username_check(cls, v: str) -> str:
-        if not v.isalnum():
-            raise ValueError("Имя пользователя должно содержать только буквы или цифры")
+    def username_lowercase(cls, v: str) -> str:
         return v.lower()
 
 
