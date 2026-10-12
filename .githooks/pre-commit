@@ -6,6 +6,11 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
+# При слиянии в индексе лежат файлы влитой ветки — чужой код не переформатируем.
+if git rev-parse -q --verify MERGE_HEAD >/dev/null; then
+    exit 0
+fi
+
 # Ruff из .venv проекта напрямую: PyCharm запускает хуки со своим PATH, где poetry может не быть.
 RUFF=backend/.venv/bin/ruff
 if [ ! -x "$RUFF" ]; then

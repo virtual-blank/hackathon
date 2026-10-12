@@ -36,7 +36,6 @@ app.include_router(users_router, prefix=ROUTERS_PREFIX)
 app.include_router(feed_router, prefix=ROUTERS_PREFIX)
 app.include_router(users_pfp_router, prefix=ROUTERS_PREFIX)
 
-
 @app.get("/health", tags=["🩺 System"], description="Healthcheck")
 async def health() -> dict[str, str]:
     """Проверка что сервер запустился йоу"""
@@ -44,4 +43,4 @@ async def health() -> dict[str, str]:
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="127.0.0.1", port=8080, reload=True)
+    uvicorn.run("main:app", host="127.0.0.1", port=8080, reload=True) 
