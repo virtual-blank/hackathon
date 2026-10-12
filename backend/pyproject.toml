@@ -17,6 +17,7 @@ pyjwt = ">=2.13.0"
 sqlalchemy = {version = ">=2.1.1", extras = ["asyncio"]}
 uuid6 = ">=2025.0.1"
 aioboto3 = "^15.5.0"
+tzdata = "^2026.5"
 
 [build-system]
 requires = ["poetry-core"]
