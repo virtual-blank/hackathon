@@ -173,6 +173,7 @@ class HabitsRepository:
         title: str,
         color_hex: str,
         visibility: Visibility,
+        start_date: date,
         notification_times: list[time],
     ) -> Habit:
         new_habit = Habit(
@@ -180,6 +181,7 @@ class HabitsRepository:
             title=title,
             color_hex=color_hex,
             visibility=visibility,
+            start_date=start_date,
             notification_times=notification_times,
         )
         self.session.add(new_habit)
