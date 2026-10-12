@@ -42,6 +42,25 @@ class MinioSettings(BaseSettings):
         return f"{self.protocol}://{self.host}:{self.port}"
 
 
+class RedisSettings(BaseSettings):
+    """
+    Подключение к Redis. Пропуска для вебсокета лежат там, а не в памяти процесса,
+    чтобы приложение можно было запускать в несколько воркеров.
+    """
+
+    model_config = SettingsConfigDict(env_file=ENV_FILE, env_prefix="REDIS_", extra="ignore")
+
+    host: str = "127.0.0.1"
+    port: int = 6379
+    db: int = 0
+    password: str | None = None
+
+    @property
+    def url(self) -> str:
+        auth = f":{self.password}@" if self.password else ""
+        return f"redis://{auth}{self.host}:{self.port}/{self.db}"
+
+
 @lru_cache
 def get_db_settings() -> PostgresSettings:
     return PostgresSettings()
@@ -55,3 +74,8 @@ def get_jwt_settings() -> JwtSettings:
 @lru_cache
 def get_minio_settings() -> MinioSettings:
     return MinioSettings()
+
+
+@lru_cache
+def get_redis_settings() -> RedisSettings:
+    return RedisSettings()

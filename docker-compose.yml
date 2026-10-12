@@ -32,8 +32,9 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-    environment:            
+    environment:
     - POSTGRES_HOST=postgres
+    - REDIS_HOST=redis
     ports:
       - "8000:8000"
     depends_on:
@@ -69,6 +70,23 @@ services:
     networks:
       - app_network
 
+  redis:
+    image: redis:7.2-alpine
+    container_name: core_redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - app_network
+
   minio-init:
     image: minio-local:2025-10-15
     pull_policy: never
@@ -96,6 +114,7 @@ services:
 
 volumes:
   pg_data:
+  redis_data:
   minio_data: 
  
 networks:
