@@ -2,42 +2,38 @@
 Одноразовые пропуска для подключения к вебсокету.
 
 Браузерный WebSocket не умеет передавать заголовок авторизации, поэтому клиент
-сначала получает короткоживущий пропуск по REST и предъявляет его при подключении.
+сначала получает пропуск по REST и предъявляет его при подключении.
 
-Храним в памяти процесса: у нас один воркер и нет Redis (см. docs/chat-schema.md).
-Если появится второй процесс — понадобится общее хранилище.
+Пропуска лежат в Redis с автоистечением, а не в памяти процесса: тогда приложение
+можно запускать в несколько воркеров — пропуск, выданный одним процессом,
+примет любой другой. Одноразовость обеспечивает атомарный GETDEL.
 """
 import secrets
-import time
 import uuid
 
+from database.redis import get_redis
+
 TICKET_TTL_SECONDS = 30
-
-# ticket -> (user_id, момент истечения в monotonic-времени)
-_tickets: dict[str, tuple[uuid.UUID, float]] = {}
+_TICKET_KEY_PREFIX = "ws_ticket:"
 
 
-def _drop_expired() -> None:
-    now = time.monotonic()
-    expired = [ticket for ticket, (_, expires_at) in _tickets.items() if expires_at <= now]
-    for ticket in expired:
-        _tickets.pop(ticket, None)
+def _key(ticket: str) -> str:
+    return f"{_TICKET_KEY_PREFIX}{ticket}"
 
 
-def create_ticket(user_id: uuid.UUID, ttl: int = TICKET_TTL_SECONDS) -> str:
-    _drop_expired()
+async def create_ticket(user_id: uuid.UUID, ttl: int = TICKET_TTL_SECONDS) -> str:
+    """Создаёт пропуск для пользователя. Redis сам удалит его по истечении TTL."""
     ticket = secrets.token_urlsafe(32)
-    _tickets[ticket] = (user_id, time.monotonic() + ttl)
+    await get_redis().set(_key(ticket), str(user_id), ex=ttl)
     return ticket
 
 
-def consume_ticket(ticket: str) -> uuid.UUID | None:
-    """Возвращает user_id и удаляет пропуск: он одноразовый."""
-    _drop_expired()
-    data = _tickets.pop(ticket, None)
-    if data is None:
+async def consume_ticket(ticket: str) -> uuid.UUID | None:
+    """Возвращает id пользователя и сразу удаляет пропуск: он одноразовый."""
+    raw_user_id = await get_redis().getdel(_key(ticket))
+    if raw_user_id is None:
         return None
-    user_id, expires_at = data
-    if expires_at <= time.monotonic():
+    try:
+        return uuid.UUID(raw_user_id)
+    except ValueError:
         return None
-    return user_id

@@ -100,3 +100,37 @@ class WSErrorOut(BaseModel):
     detail: str
 
 
+# ═══════════════════════════════════════════════════════════════
+# HTTP-схемы: список диалогов, отметка прочтения, пропуск для сокета
+# ═══════════════════════════════════════════════════════════════
+
+
+class MarkReadSchema(BaseModel):
+    """Отметка прочтения списком сообщений (для HTTP-ручки)."""
+    message_ids: Annotated[list[uuid.UUID], Field(min_length=1)]
+
+
+class ChatPeerSchema(BaseModel):
+    """Собеседник в списке диалогов. Только публичные поля."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    username: str
+
+
+class ChatOutputSchema(BaseModel):
+    """Строка списка диалогов: собеседник, последнее сообщение и непрочитанные."""
+    peer: ChatPeerSchema
+    last_message_id: uuid.UUID | None = None
+    last_message_text: str | None = None
+    last_message_at: datetime | None = None
+    # Считается на лету по is_read, отдельного счётчика в БД нет.
+    unread_count: int = 0
+
+
+class WsTicketSchema(BaseModel):
+    """Одноразовый короткоживущий пропуск для подключения к вебсокету."""
+    ticket: str
+    expires_in: int
+
+

@@ -5,28 +5,26 @@ from fastapi import APIRouter, HTTPException, Query, status
 from src.auth.deps import CurrentUserDep, SessionDep
 from src.exceptions.social_exceptions import (
     ChatWithSelfError,
-    MessageNotFoundError,
     NotFriendsError,
     SocialError,
     UserBlockedError,
 )
 from src.social.schemas import (
     ChatOutputSchema,
+    MarkReadSchema,
     MessageCreateSchema,
     MessageOutputSchema,
-    ReadMessageSchema,
     WsTicketSchema,
 )
 from src.social.service import SocialService
 
-router = APIRouter(prefix="/api/social", tags=["💬 Social"])
+router = APIRouter(prefix="/social", tags=["💬 Social"])
 
 # Ошибки сервиса -> коды ответа. Роутер только переводит, логики не содержит.
 _ERROR_STATUS: dict[type[SocialError], int] = {
     ChatWithSelfError: status.HTTP_400_BAD_REQUEST,
     NotFriendsError: status.HTTP_403_FORBIDDEN,
     UserBlockedError: status.HTTP_403_FORBIDDEN,
-    MessageNotFoundError: status.HTTP_404_NOT_FOUND,
 }
 
 
@@ -39,7 +37,7 @@ def _to_http_error(exc: SocialError) -> HTTPException:
 @router.get(
     "/chats",
     response_model=list[ChatOutputSchema],
-    description="Список диалогов с последним сообщением и числом непрочитанных",
+    description="Список диалогов: собеседник, последнее сообщение, число непрочитанных",
 )
 async def list_chats(user: CurrentUserDep, session: SessionDep):
     return await SocialService(session).list_chats(user.id)
@@ -77,27 +75,21 @@ async def send_message(
     payload: MessageCreateSchema, user: CurrentUserDep, session: SessionDep
 ):
     try:
-        return await SocialService(session).send_message(user.id, payload.peer_id, payload.content)
+        return await SocialService(session).send_message(
+            user.id, payload.receiver_id, payload.content
+        )
     except SocialError as exc:
         raise _to_http_error(exc) from exc
 
 
 # == MARK READ ==
 @router.post(
-    "/chats/{peer_id}/read",
-    status_code=status.HTTP_204_NO_CONTENT,
-    description="Отметить прочитанным всё от собеседника до указанного сообщения",
+    "/messages/read",
+    response_model=list[MessageOutputSchema],
+    description="Отметить переданные сообщения прочитанными (чужие игнорируются)",
 )
-async def mark_read(
-    peer_id: uuid.UUID,
-    payload: ReadMessageSchema,
-    user: CurrentUserDep,
-    session: SessionDep,
-):
-    try:
-        await SocialService(session).mark_read(user.id, peer_id, payload.last_read_message_id)
-    except SocialError as exc:
-        raise _to_http_error(exc) from exc
+async def mark_read(payload: MarkReadSchema, user: CurrentUserDep, session: SessionDep):
+    return await SocialService(session).mark_read(user.id, payload.message_ids)
 
 
 # == WS TICKET ==

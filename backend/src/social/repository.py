@@ -1,10 +1,12 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select, update, or_, and_
+from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.social.models import Message
+from src.social.enums import RelationStatus
+from src.social.models import Message, UserRelation
+from src.users.models import User
 
 
 class MessagesRepository:
@@ -92,3 +94,86 @@ class MessagesRepository:
         )
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+    # == Список диалогов ==
+
+    async def get_last_messages(self, user_id: uuid.UUID) -> list[tuple[Message, uuid.UUID]]:
+        """
+        Последнее сообщение по каждому собеседнику — для списка диалогов.
+        Нумерация внутри собеседника оконной функцией: одного запроса достаточно,
+        обходить диалоги по одному не нужно.
+        """
+        peer_expr = case(
+            (Message.sender_id == user_id, Message.receiver_id), else_=Message.sender_id
+        )
+        ranked = (
+            select(
+                Message.id.label("message_id"),
+                peer_expr.label("peer_id"),
+                func.row_number()
+                .over(partition_by=peer_expr, order_by=Message.id.desc())
+                .label("row_number"),
+            )
+            .where(or_(Message.sender_id == user_id, Message.receiver_id == user_id))
+            .subquery()
+        )
+        stmt = (
+            select(Message, ranked.c.peer_id)
+            .join(ranked, ranked.c.message_id == Message.id)
+            .where(ranked.c.row_number == 1)
+            .order_by(Message.id.desc())
+        )
+        result = await self.session.execute(stmt)
+        return [(message, peer_id) for message, peer_id in result.all()]
+
+    async def count_unread_by_peers(self, user_id: uuid.UUID) -> dict[uuid.UUID, int]:
+        """Количество непрочитанных по каждому собеседнику — одним запросом."""
+        stmt = (
+            select(Message.sender_id, func.count())
+            .where(Message.receiver_id == user_id, Message.is_read.is_(False))
+            .group_by(Message.sender_id)
+        )
+        result = await self.session.execute(stmt)
+        return {peer_id: count for peer_id, count in result.all()}
+
+    # == Пользователи ==
+
+    async def get_users(self, user_ids: set[uuid.UUID]) -> dict[uuid.UUID, User]:
+        """Пользователи по списку id — чтобы не ходить в БД на каждый диалог."""
+        if not user_ids:
+            return {}
+        stmt = select(User).where(User.id.in_(user_ids))
+        result = await self.session.execute(stmt)
+        return {user.id: user for user in result.scalars().all()}
+
+    # == Отношения пользователей ==
+
+    async def are_friends(self, user_a: uuid.UUID, user_b: uuid.UUID) -> bool:
+        """Дружба — статус accepted, направление записи не важно."""
+        stmt = (
+            select(UserRelation.id)
+            .where(
+                UserRelation.status == RelationStatus.ACCEPTED,
+                or_(
+                    and_(UserRelation.user_id == user_a, UserRelation.target_id == user_b),
+                    and_(UserRelation.user_id == user_b, UserRelation.target_id == user_a),
+                ),
+            )
+            .limit(1)
+        )
+        return (await self.session.scalar(stmt)) is not None
+
+    async def is_blocked_between(self, user_a: uuid.UUID, user_b: uuid.UUID) -> bool:
+        """Блокировка в любую сторону закрывает переписку обоим."""
+        stmt = (
+            select(UserRelation.id)
+            .where(
+                UserRelation.status == RelationStatus.BLOCKED,
+                or_(
+                    and_(UserRelation.user_id == user_a, UserRelation.target_id == user_b),
+                    and_(UserRelation.user_id == user_b, UserRelation.target_id == user_a),
+                ),
+            )
+            .limit(1)
+        )
+        return (await self.session.scalar(stmt)) is not None
