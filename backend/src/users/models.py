@@ -20,14 +20,11 @@ class User(Uuid7PkMixin, TimeStampMixin, Base):
     username: Mapped[str] = mapped_column(String(16), unique=True)
     email: Mapped[str] = mapped_column(String(255), unique=True)
     password_hash: Mapped[str] = mapped_column(String(255))
-
+    pfp_url: Mapped[str | None] = mapped_column(default=None)
     # Настройки (вместо отдельной таблицы users_settings)
     theme: Mapped[Theme] = mapped_column(str_enum(Theme), default=Theme.SYSTEM, server_default=Theme.SYSTEM.value)
 
     timezone: Mapped[str] = mapped_column(String(64), server_default="UTC")
-
-    # Ключ файла в хранилище, а не ссылка: presigned URL временный и выдаётся на каждый запрос.
-    pfp_key: Mapped[str | None] = mapped_column(String(255))
 
     # Telegram. chat_id у Telegram числовой и может быть больше int32.
     telegram_chat_id: Mapped[int | None] = mapped_column(BigInteger, unique=True)

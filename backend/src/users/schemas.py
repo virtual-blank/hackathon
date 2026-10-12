@@ -3,8 +3,7 @@ from datetime import datetime
 from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr, field_validator
-
-from src.users.enums import AvatarContentType
+from src.users.pfp.minio import DEFAULT_PFP_URL
 
 
 class UserCreateSchema(BaseModel):
@@ -38,7 +37,6 @@ class UserUpdateSchema(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
     username: str | None = None
     password: SecretStr | None = None
-    pfp_url: str | None = None
 
 
 class UserOutputSchema(BaseModel):
@@ -48,27 +46,12 @@ class UserOutputSchema(BaseModel):
     username: str
     email: EmailStr
     telegram_chat_id: int | None = None
-    # todo: добавить позже pfp_url: str | None = None | ссылка на фотку профиля (minio)
-
-
-class AvatarUploadCreateSchema(BaseModel):
-    content_type: AvatarContentType
-
-
-class AvatarUploadOutputSchema(BaseModel):
-    upload_url: str
-    key: str
-    content_type: AvatarContentType
-    expires_in_sec: int
-
-
-class AvatarSetSchema(BaseModel):
-    key: Annotated[str, Field(min_length=1, max_length=255)]
-
-
-class AvatarOutputSchema(BaseModel):
     pfp_url: str
-    expires_in_sec: int
+
+    @field_validator("pfp_url", mode="before")
+    @classmethod
+    def set_default_pfp(cls, v: str | None) -> str:
+        return v or DEFAULT_PFP_URL
 
 
 class TokenSchema(BaseModel):

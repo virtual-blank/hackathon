@@ -7,7 +7,6 @@ package-mode = false
 
 [tool.poetry.dependencies]
 python = ">=3.12,<4.0"
-aioboto3 = ">=15.5.0"
 alembic = ">=1.20.0"
 asyncpg = ">=0.31.0"
 fastapi = {version = ">=0.142.0", extras = ["standard"]}
@@ -17,6 +16,7 @@ pydantic-settings = ">=2.15.0"
 pyjwt = ">=2.13.0"
 sqlalchemy = {version = ">=2.1.1", extras = ["asyncio"]}
 uuid6 = ">=2025.0.1"
+aioboto3 = "^15.5.0"
 
 [tool.poetry.group.dev.dependencies]
 ruff = "==0.15.18"
