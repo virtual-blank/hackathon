@@ -12,6 +12,7 @@ from src.habits.enums import Visibility, InviteStatus
 
 if TYPE_CHECKING:
     from src.users.models import User
+    from src.feed.models import Review
 
 
 class Habit(Uuid7PkMixin, TimeStampMixin, Base):
@@ -42,6 +43,8 @@ class Habit(Uuid7PkMixin, TimeStampMixin, Base):
     creator: Mapped["User"] = relationship(back_populates="habits")
     logs: Mapped[list["HabitLog"]] = relationship(back_populates="habit")
     shared_habit_user: Mapped["SharedHabitUser"] = relationship(back_populates="habit")
+    reviews: Mapped[list["Review"]] = relationship(back_populates="habit")
+
 
     __table_args__ = (
         CheckConstraint("cardinality(notification_times) <= 3", name="max_3_reminders"),
@@ -73,7 +76,7 @@ class SharedHabitUser(Uuid7PkMixin, TimeStampMixin, Base):
 
 
 
-class HabitLog(Uuid7PkMixin, Base):
+class HabitLog(Uuid7PkMixin, TimeStampMixin, Base):
     __tablename__ = "habit_logs"
 
     # Пользователь может отмечать привычку только если:

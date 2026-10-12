@@ -1,0 +1,103 @@
+services:
+  postgres:
+    image: postgres:16.2-alpine
+    container_name: core_db
+    restart: unless-stopped
+    env_file:
+      - .env 
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_NAME}
+    ports:
+      - "${POSTGRES_PORT:-5435}:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - app_network
+ 
+  backend:
+    profiles: ["full"]
+    build:
+      context: ./backend      
+      dockerfile: Dockerfile
+    container_name: fastapi_backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:            
+    - POSTGRES_HOST=postgres
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy 
+    networks:
+      - app_network
+    volumes:
+      - ./backend:/app/backend    
+      - /app/backend/.venv
+ 
+  minio:
+    build:
+      context: ./backend/src/users/pfp
+      dockerfile: Dockerfile
+    image: minio-local:2025-10-15
+    container_name: minio_server
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "9000:9000" # API
+      - "9001:9001" # WEB UI
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - app_network
+
+  minio-init:
+    image: minio-local:2025-10-15
+    pull_policy: never
+    container_name: minio_init
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      BUCKET: ${MINIO_BUCKET_NAME}
+    volumes:
+      - ./frontend/assets/defaults:/defaults:ro
+    networks:
+      - app_network
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD; do sleep 1; done &&
+      mc mb --ignore-existing local/$$BUCKET &&
+      mc anonymous set download local/$$BUCKET/defaults &&
+      mc anonymous set download local/$$BUCKET/pfp &&
+      mc cp /defaults/default-pfp.webp local/$$BUCKET/defaults/default-pfp.webp
+      "
+
+volumes:
+  pg_data:
+  minio_data: 
+ 
+networks:
+  app_network:
+    driver: bridge

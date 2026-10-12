@@ -1,0 +1,39 @@
+target-version = "py312"
+line-length = 120
+
+# Миграции генерирует alembic — их не линтим и не форматируем.
+extend-exclude = ["alembic/versions"]
+
+[lint]
+select = [
+    "E",  # pycodestyle: ошибки оформления
+    "W",  # pycodestyle: предупреждения (пробелы в конце строк и т.п.)
+    "F",  # pyflakes: неиспользуемые импорты и переменные, неопределённые имена
+    "I",  # isort: порядок импортов
+    "UP", # pyupgrade: устаревший синтаксис (List[X] -> list[X])
+    "B",  # bugbear: частые ошибки (изменяемый дефолт аргумента, except без raise from)
+]
+
+[lint.per-file-ignores]
+# Модели импортируются ради побочного эффекта — регистрации таблиц в Base.metadata.
+# Без этих импортов SQLAlchemy не соберёт relationship, а alembic не увидит таблицы,
+# поэтому `ruff check --fix` не должен их удалять как неиспользуемые (F401).
+"main.py" = ["F401"]
+# В env.py импорты идут после настройки логирования alembic (E402).
+"alembic/env.py" = ["F401", "E402"]
+
+[lint.flake8-bugbear]
+# Вызовы FastAPI в дефолтах аргументов — норма, а не изменяемый дефолт.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.File",
+    "fastapi.Form",
+]
+
+[format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
