@@ -57,8 +57,11 @@ class UserOutputSchema(BaseModel):
 class TokenSchema(BaseModel):
     access_token: str
     token_type: str = "Bearer"
+    refresh_token: str
 
-
+class RefreshTokenSchema(BaseModel):
+    refresh_token: str
+    
 class AuthOutputSchema(BaseModel):
     user: UserOutputSchema
     token: TokenSchema

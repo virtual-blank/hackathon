@@ -25,7 +25,7 @@ class JwtSettings(BaseSettings):
     access_token_expire_minutes: int
     secret_key: str
     algorithm: str
-
+    refresh_token_expire_days: int = 30
 
 class MinioSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=ENV_FILE, env_prefix="MINIO_", extra="ignore")
