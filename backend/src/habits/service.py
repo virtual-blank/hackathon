@@ -1,13 +1,68 @@
 import uuid
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, date
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.habits.repository import HabitsRepository
-from src.habits.schemas import HabitCreateSchema, HabitOutputSchema, HabitUpdateSchema
+from src.habits.repository import HabitsRepository, HabitLogRepository
+from src.habits.schemas import HabitCreateSchema, HabitOutputSchema, HabitUpdateSchema, HabitLogOutputSchema
 from src.users.models import User
 
+class HabitLogService:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+        self.repo = HabitLogRepository(session=session)
+
+    async def mark_completed(self, user_id: uuid.UUID, habit_id: uuid.UUID, completed_date: date | None = None):
+        user = await self.session.get(User, user_id)
+        if user is None:
+            raise ValueError("Пользователь не найден")
+        if not user.timezone:
+            raise ValueError("Часовой пояс пользователя не указан")
+
+        try:
+            user_timezone = ZoneInfo(user.timezone)
+        except ZoneInfoNotFoundError:
+            raise ValueError("Некорректный часовой пояс пользователя")
+
+        date_today = datetime.now(user_timezone).date()
+
+        if completed_date is None:
+            completed_date = date_today
+
+        if completed_date > date_today:
+            raise ValueError("Нельзя отметить привычку выполненной в будущем")
+
+        log = await self.repo.mark_completed(user_id=user_id, habit_id=habit_id, completed_date=completed_date)
+        return HabitLogOutputSchema.model_validate(log)
+
+    async def get_logs_in_range(
+            self,
+            user_id: uuid.UUID,
+            date_from: date,
+            date_to: date,
+            habit_id: uuid.UUID | None = None,
+    ):
+        logs = await self.repo.get_logs_in_range(
+            user_id=user_id,
+            date_from=date_from,
+            date_to=date_to,
+            habit_id=habit_id,
+        )
+        return [HabitLogOutputSchema.model_validate(log) for log in logs]
+
+
+    async def get_completed_habits_by_date(self, user_id: uuid.UUID, target_date: date):
+        completed_habits = await self.repo.get_completed_habits_by_date(user_id=user_id, target_date=target_date)
+        return [HabitOutputSchema.model_validate(completed_habit) for completed_habit in completed_habits]
+
+
+    async def get_uncompleted_habits_by_date(self, user_id: uuid.UUID, target_date: date):
+        uncompleted_habits = await self.repo.get_uncompleted_habits_by_date(user_id=user_id, target_date=target_date)
+        return [HabitOutputSchema.model_validate(uncompleted_habit) for uncompleted_habit in uncompleted_habits]
+
+    async def delete_log(self, user_id: uuid.UUID, log_id: uuid.UUID):
+        return await self.repo.delete_log(user_id=user_id, log_id=log_id)
 
 class HabitsService:
     def __init__(self, session: AsyncSession):
@@ -54,3 +109,6 @@ class HabitsService:
 
     async def delete_habit(self, user_id: uuid.UUID, habit_id: uuid.UUID):
         return await self.repo.delete_habit(habit_id=habit_id, creator_id=user_id)
+
+
+
