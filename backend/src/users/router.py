@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, status
-from src.auth.deps import SessionDep
+from src.auth.deps import SessionDep, CurrentUserDep
 from src.users.schemas import AuthOutputSchema, UserCreateSchema, UserLoginSchema
 from src.users.service import UsersService
 
@@ -31,10 +31,30 @@ async def login(user_data: UserLoginSchema, session: SessionDep):
         print(e)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
+# == LOG OUT ==
+@router.post("/logout",status_code=status.HTTP_204_NO_CONTENT,description="Logout",)
+async def logout(user: CurrentUserDep):
+    return None
+
+# == DELETE ACCOUNT ==
+@router.delete("/me",status_code=status.HTTP_204_NO_CONTENT,description="Delete my account",)
+async def delete_account(user: CurrentUserDep, session: SessionDep):
+    service = UsersService(session=session)
+    try:
+        await service.delete_account(user_id=user.id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        print(e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal Server Error",
+        )
+    return None
 
 # todo: кастомные exception
 
 
-# == LOG OUT ==
+
 # == REFRESH TOKEN ==
 # == DELETE ACCOUNT ==

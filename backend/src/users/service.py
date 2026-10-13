@@ -1,3 +1,5 @@
+import uuid
+
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.auth.hash_argon import DUMMY_HASH, create_password, verify_password
@@ -41,3 +43,8 @@ class UsersService:
         token_str = create_access_token(user_id=user_dao.id)
         token_jwt = TokenSchema(access_token=token_str)
         return AuthOutputSchema(user=UserOutputSchema.model_validate(user_dao), token=token_jwt)
+    
+    async def delete_account(self, user_id: uuid.UUID) -> None:
+        deleted = await self.repo.delete_user(user_id=user_id)
+        if not deleted:
+            raise ValueError("Пользователь не найден")
