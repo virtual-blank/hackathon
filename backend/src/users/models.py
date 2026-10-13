@@ -55,7 +55,10 @@ class User(Uuid7PkMixin, TimeStampMixin, Base):
         back_populates="receiver",
         foreign_keys="Message.receiver_id",
     )
-
+    refresh_tokens: Mapped[list["RefreshToken"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
 class UserAchievement(Uuid7PkMixin, TimeStampMixin, Base):
     """Достижение уровня пользователя, не привязано к конкретной привычке."""
@@ -71,3 +74,16 @@ class UserAchievement(Uuid7PkMixin, TimeStampMixin, Base):
     __table_args__ = (
         UniqueConstraint("user_id", "achievement_name"),  # индекс по user_id получается бесплатно
     )
+
+
+class RefreshToken(Uuid7PkMixin, TimeStampMixin, Base):
+    """Refresh-токен. Opaque-строка, хранится в БД, отзывается через logout."""
+    __tablename__ = "refresh_tokens"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    user: Mapped["User"] = relationship(back_populates="refresh_tokens")
