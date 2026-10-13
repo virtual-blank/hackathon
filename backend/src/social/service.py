@@ -1,11 +1,9 @@
 import uuid
 
-from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.social.enums import RelationStatus
-from src.social.models import Message, UserRelation
+from src.social.models import Message
 from src.social.repository import MessagesRepository
 
 
@@ -29,7 +27,7 @@ class SocialService:
         if sender_id == receiver_id:
             raise ValueError("Нельзя отправить сообщение самому себе")
 
-        if await self._is_blocked(sender_id, receiver_id):
+        if await self.repo.is_blocked_between(sender_id, receiver_id):
             raise ValueError("Невозможно отправить сообщение: пользователь недоступен")
 
         try:
@@ -82,20 +80,3 @@ class SocialService:
             user_id=user_id,
             from_user_id=from_user_id,
         )
-
-    async def _is_blocked(
-        self,
-        user_a: uuid.UUID,
-        user_b: uuid.UUID,
-    ) -> bool:
-        """
-        Проверить, есть ли блокировка в любую сторону между двумя пользователями.
-        Если A заблокировал B или B заблокировал A — сообщение запрещено.
-        """
-        stmt = select(UserRelation).where(
-            UserRelation.status == RelationStatus.BLOCKED,
-            ((UserRelation.user_id == user_a) & (UserRelation.target_id == user_b))
-            | ((UserRelation.user_id == user_b) & (UserRelation.target_id == user_a)),
-        )
-        result = await self.session.execute(stmt)
-        return result.scalar_one_or_none() is not None
