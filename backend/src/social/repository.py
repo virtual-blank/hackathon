@@ -1,10 +1,11 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from sqlalchemy import select, update, or_, and_
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.social.models import Message
+from src.social.enums import RelationStatus
+from src.social.models import Message, UserRelation
 
 
 class MessagesRepository:
@@ -68,7 +69,7 @@ class MessagesRepository:
                 Message.receiver_id == reader_id,
                 Message.is_read.is_(False),
             )
-            .values(is_read=True, read_at=datetime.now(timezone.utc))
+            .values(is_read=True, read_at=datetime.now(UTC))
             .returning(Message)
         )
         result = await self.session.execute(stmt)
@@ -92,3 +93,20 @@ class MessagesRepository:
         )
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+    async def is_blocked_between(
+        self,
+        user_a: uuid.UUID,
+        user_b: uuid.UUID,
+    ) -> bool:
+        """
+        Проверить, есть ли блокировка в любую сторону между двумя пользователями.
+        Если A заблокировал B или B заблокировал A — сообщение запрещено.
+        """
+        stmt = select(UserRelation).where(
+            UserRelation.status == RelationStatus.BLOCKED,
+            ((UserRelation.user_id == user_a) & (UserRelation.target_id == user_b))
+            | ((UserRelation.user_id == user_b) & (UserRelation.target_id == user_a)),
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none() is not None
