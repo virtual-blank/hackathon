@@ -88,7 +88,7 @@ class UsersService:
         if token_dao.expires_at < datetime.now(timezone.utc):
             raise ValueError("Refresh-токен истёк")
 
-        user_dao = await self.session.get(User, token_dao.user_id)
+        user_dao = await self.repo.get_user_by_id(user_id=token_dao.user_id)
         if not user_dao:
             raise ValueError("Пользователь не найден")
 
