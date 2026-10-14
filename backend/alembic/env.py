@@ -11,6 +11,7 @@ import src.users.models
 import src.habits.models
 import src.social.models
 import src.feed.models
+import src.achievements.models
 
 DB_URL = get_db_settings().url
 
