@@ -7,6 +7,7 @@ from src.users.models import User, UserAchievement
 from src.habits.models import Habit, HabitLog, SharedHabitUser
 from src.social.models import UserRelation, Message
 from src.feed.models import Review
+from src.achievements.models import Achievement
 # == MODELS ==
 
 # == ROUTERS ==
