@@ -2,12 +2,13 @@ import uuid
 from datetime import date, time
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.habits.enums import InviteStatus, Visibility
 from src.habits.models import Habit, HabitLog, SharedHabitUser
+
 
 class HabitLogRepository:
     def __init__(self, session: AsyncSession):
@@ -37,9 +38,7 @@ class HabitLogRepository:
             await self.session.flush()
         except IntegrityError as exc:
             await self.session.rollback()
-            raise ValueError(
-                f"Привычка {habit_id} уже отмечена выполненной на {completed_date}"
-            ) from exc
+            raise ValueError(f"Привычка {habit_id} уже отмечена выполненной на {completed_date}") from exc
         await self.session.refresh(log)
         return log
 
@@ -93,12 +92,9 @@ class HabitLogRepository:
         user_id: uuid.UUID,
         target_date: date,
     ) -> list[Habit]:
-        created_ids = (
-            select(Habit.id)
-            .where(
-                Habit.creator_id == user_id,
-                Habit.start_date <= target_date,
-            )
+        created_ids = select(Habit.id).where(
+            Habit.creator_id == user_id,
+            Habit.start_date <= target_date,
         )
         shared_ids = (
             select(Habit.id)
@@ -109,12 +105,9 @@ class HabitLogRepository:
                 Habit.start_date <= target_date,
             )
         )
-        completed_subq = (
-            select(HabitLog.habit_id)
-            .where(
-                HabitLog.user_id == user_id,
-                HabitLog.completed_date == target_date,
-            )
+        completed_subq = select(HabitLog.habit_id).where(
+            HabitLog.user_id == user_id,
+            HabitLog.completed_date == target_date,
         )
         stmt = (
             select(Habit)
@@ -133,12 +126,9 @@ class HabitLogRepository:
         user_id: uuid.UUID,
         log_id: uuid.UUID,
     ) -> bool:
-        stmt = (
-            delete(HabitLog)
-            .where(
-                HabitLog.id == log_id,
-                HabitLog.user_id == user_id,
-            )
+        stmt = delete(HabitLog).where(
+            HabitLog.id == log_id,
+            HabitLog.user_id == user_id,
         )
         result = await self.session.execute(stmt)
         await self.session.flush()
@@ -189,8 +179,7 @@ class HabitsRepository:
         return new_habit
 
     async def get_habit_by_id(self, habit_id: uuid.UUID, creator_id: uuid.UUID) -> Habit | None:
-        habit = select(Habit).where(Habit.id == habit_id,
-                                    Habit.creator_id == creator_id)
+        habit = select(Habit).where(Habit.id == habit_id, Habit.creator_id == creator_id)
         result = await self.session.execute(habit)
         return result.scalar_one_or_none()
 
@@ -229,3 +218,6 @@ class HabitsRepository:
         result = await self.session.execute(stmt)
         await self.session.commit()
         return result.scalar_one_or_none() is not None
+
+    async def mark_habit(self, habit_id: uuid.UUID, user_id: uuid.UUID):
+        stmt = update(Habit)

@@ -4,8 +4,9 @@ import uuid
 import aioboto3
 import botocore
 from botocore.exceptions import BotoCoreError, ClientError
-from core.config import get_minio_settings
 from uuid6 import uuid7
+
+from core.config import get_minio_settings
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,7 @@ SECRET_KEY = get_minio_settings().root_password
 
 PUBLIC_PREFIX = f"{MINIO_ENDPOINT}/{BUCKET_NAME}/"
 DEFAULT_PFP_URL = f"{PUBLIC_PREFIX}defaults/default-pfp.webp"
+ACHIEVEMENTS_PREFIX = f"{MINIO_ENDPOINT}/achievements/"
 
 
 class MinioService:
