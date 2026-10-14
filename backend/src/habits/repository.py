@@ -40,6 +40,7 @@ class HabitLogRepository:
             raise ValueError(
                 f"Привычка {habit_id} уже отмечена выполненной на {completed_date}"
             ) from exc
+        await self.session.commit()
         await self.session.refresh(log)
         return log
 
@@ -50,6 +51,8 @@ class HabitLogRepository:
         date_from: date,
         date_to: date,
         habit_id: uuid.UUID | None = None,
+        limit: int = 50,
+        offset: int = 0,
     ) -> list[HabitLog]:
         if date_from > date_to:
             raise ValueError("Первая дата не может быть больше последней")
@@ -62,6 +65,8 @@ class HabitLogRepository:
                 HabitLog.completed_date <= date_to,
             )
             .order_by(HabitLog.completed_date.asc(), HabitLog.id.asc())
+            .limit(limit)
+            .offset(offset)
         )
         if habit_id is not None:
             stmt = stmt.where(HabitLog.habit_id == habit_id)
@@ -141,7 +146,20 @@ class HabitLogRepository:
             )
         )
         result = await self.session.execute(stmt)
-        await self.session.flush()
+        await self.session.commit()
+        return result.rowcount > 0
+
+    async def remove_completion(self, *, user_id: uuid.UUID, habit_id: uuid.UUID, completed_date: date) -> bool:
+        stmt = (
+            delete(HabitLog)
+            .where(
+                HabitLog.user_id == user_id,
+                HabitLog.habit_id == habit_id,
+                HabitLog.completed_date == completed_date,
+            )
+        )
+        result = await self.session.execute(stmt)
+        await self.session.commit()
         return result.rowcount > 0
 
     async def _user_can_log_habit(

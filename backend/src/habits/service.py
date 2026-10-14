@@ -42,12 +42,16 @@ class HabitLogService:
             date_from: date,
             date_to: date,
             habit_id: uuid.UUID | None = None,
+            limit: int = 50,
+            offset: int = 0,
     ):
         logs = await self.repo.get_logs_in_range(
             user_id=user_id,
             date_from=date_from,
             date_to=date_to,
             habit_id=habit_id,
+            limit=limit,
+            offset=offset,
         )
         return [HabitLogOutputSchema.model_validate(log) for log in logs]
 
@@ -63,6 +67,26 @@ class HabitLogService:
 
     async def delete_log(self, user_id: uuid.UUID, log_id: uuid.UUID):
         return await self.repo.delete_log(user_id=user_id, log_id=log_id)
+
+    async def remove_completion(self, user_id: uuid.UUID, habit_id: uuid.UUID, completed_date: date | None = None):
+        user = await self.session.get(User, user_id)
+        if user is None:
+            raise ValueError("Пользователь не найден")
+        if not user.timezone:
+            raise ValueError("Часовой пояс пользователя не указан")
+
+        try:
+            user_timezone = ZoneInfo(user.timezone)
+        except ZoneInfoNotFoundError:
+            raise ValueError("Некорректный часовой пояс пользователя")
+
+        date_today = datetime.now(user_timezone).date()
+        if completed_date is None:
+            completed_date = date_today
+
+        log = await self.repo.remove_completion(user_id=user_id, habit_id=habit_id, completed_date=completed_date)
+        return log
+
 
 class HabitsService:
     def __init__(self, session: AsyncSession):
