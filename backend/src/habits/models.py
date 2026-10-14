@@ -1,18 +1,30 @@
 import uuid
-from datetime import date, time, datetime
+from datetime import date, datetime, time
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey, String, Date, ARRAY, Time, text, DateTime, CheckConstraint, UniqueConstraint, Index
+from sqlalchemy import (
+    ARRAY,
+    CheckConstraint,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Time,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database.db import Base
 from database.enum import str_enum
-from database.mixins import Uuid7PkMixin, TimeStampMixin
-from src.habits.enums import Visibility, InviteStatus
+from database.mixins import TimeStampMixin, Uuid7PkMixin
+from src.habits.enums import InviteStatus, Visibility
 
 if TYPE_CHECKING:
-    from src.users.models import User
     from src.feed.models import Review
+    from src.users.models import User
 
 
 class Habit(Uuid7PkMixin, TimeStampMixin, Base):
@@ -24,16 +36,19 @@ class Habit(Uuid7PkMixin, TimeStampMixin, Base):
     # формат проверяет Pydantic
     color_hex: Mapped[str] = mapped_column(String(7), default="#4F46E5", server_default="#4F46E5")
 
+    current_streak_days: Mapped[int] = mapped_column(Integer, server_default="0", default=0)
+    max_streak_days: Mapped[int] = mapped_column(Integer, server_default="0", default=0)
+
     # По умолчанию FRIENDS: так не-друзья ничего не видят.
     visibility: Mapped[Visibility] = mapped_column(
-        str_enum(Visibility), default=Visibility.FRIENDS, server_default=Visibility.FRIENDS.value)
+        str_enum(Visibility), default=Visibility.FRIENDS, server_default=Visibility.FRIENDS.value
+    )
 
     # Первый день отсчёта: сегодня в часовом поясе создателя. Без default, ставит сервис.
     start_date: Mapped[date] = mapped_column(Date)
 
     # До 3 напоминаний, время в часовом поясе пользователя.
-    notification_times: Mapped[list[time]] = mapped_column(
-        ARRAY(Time), default=list, server_default=text("'{}'"))
+    notification_times: Mapped[list[time]] = mapped_column(ARRAY(Time), default=list, server_default=text("'{}'"))
 
     # Когда ушло последнее напоминание. По одному этому полю определяем, какие из слотов
     # за сегодня уже отправлены (слот отправлен, если last_reminded_at >= время слота).
@@ -45,10 +60,8 @@ class Habit(Uuid7PkMixin, TimeStampMixin, Base):
     shared_habit_user: Mapped["SharedHabitUser"] = relationship(back_populates="habit")
     reviews: Mapped[list["Review"]] = relationship(back_populates="habit")
 
+    __table_args__ = (CheckConstraint("cardinality(notification_times) <= 3", name="max_3_reminders"),)
 
-    __table_args__ = (
-        CheckConstraint("cardinality(notification_times) <= 3", name="max_3_reminders"),
-    )
 
 class SharedHabitUser(Uuid7PkMixin, TimeStampMixin, Base):
     """
@@ -60,6 +73,7 @@ class SharedHabitUser(Uuid7PkMixin, TimeStampMixin, Base):
     Выход партнёра или разрыв дружбы = удалить строку и логи партнёра по этой привычке;
     привычка остаётся у создателя как личная.
     """
+
     __tablename__ = "shared_habit_users"
 
     # unique=True: в v1 только пара. Для групп замените на UniqueConstraint("habit_id", "user_id").
@@ -73,7 +87,6 @@ class SharedHabitUser(Uuid7PkMixin, TimeStampMixin, Base):
 
     habit: Mapped["Habit"] = relationship(back_populates="shared_habit_user")
     user: Mapped["User"] = relationship(back_populates="shared_habit_users")
-
 
 
 class HabitLog(Uuid7PkMixin, TimeStampMixin, Base):

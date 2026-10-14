@@ -1,3 +1,5 @@
+import hashlib
+import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -8,7 +10,7 @@ from src.exceptions.auth_exceptions import InvalidTokenError
 ACCESS_TOKEN_EXPIRE_MINUTES = get_jwt_settings().access_token_expire_minutes
 SECRET_KEY = get_jwt_settings().secret_key
 ALGORITHM = get_jwt_settings().algorithm
-
+REFRESH_TOKEN_EXPIRE_DAYS = get_jwt_settings().refresh_token_expire_days
 
 def create_access_token(user_id: uuid.UUID, expires_delta: timedelta | None = None) -> str:
     expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
@@ -31,3 +33,10 @@ def decode_access_token(token: str) -> uuid.UUID:
         return uuid.UUID(sub)
     except ValueError as exc:
         raise InvalidTokenError("Некорректный sub в токене") from exc
+
+def create_refresh_token() -> str:
+    return secrets.token_urlsafe(64)
+
+
+def hash_refresh_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()

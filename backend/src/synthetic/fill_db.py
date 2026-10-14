@@ -1,20 +1,34 @@
 import asyncio
 import re
 import time
-import uuid
 
 import asyncpg
-from core.config import get_db_settings
+
+from core.config import get_db_settings, get_minio_settings
+from src.auth.hash_argon import create_password
 
 # =====================================================================
-#  СОЗДАТЬ В ДОКЕ 3 АККА ДОБАВИТЬ СЮДА: username и id (потом объясню зачем)
+#  3 ЮЗЕРА
 # =====================================================================
-USERNAME_1 = "misterkredo"
-UUID_1 = "01a1277a-2f83-7431-938c-9b760d66a8c7"
-USERNAME_2 = "anasyasis"
-UUID_2 = "01a1277a-4a21-7f60-963f-3fe3a5942769"
-USERNAME_3 = "gufzdoh"
-UUID_3 = "01a1277a-61c3-7d05-ac8c-0ce1f5483dfe"
+USERS = {
+    "USER_1": {"username": "nullnull", "password": "nullnull", "email": "nullnull@gmail.com"},
+    "USER_2": {"username": "testtest", "password": "testtest", "email": "testtest@gmail.com"},
+    "USER_3": {"username": "sudosudo", "password": "sudosudo", "email": "sudosudo@gmail.com"},
+}
+
+tasks = {}
+
+async def hash_users():
+
+  async with asyncio.TaskGroup() as tg:
+      for user_id, user_data in USERS.items():
+          task = tg.create_task(create_password, user_data.get("password"))
+          tasks[user_id] = task
+      for user_id, task in tasks.items():
+          result = task.result()
+          if result:
+              USERS[user_id]["password_hash"] = result
+
 
 # =====================================================================
 #  ОБЪЁМ ДАННЫХ / НАСТРОЙКИ
@@ -31,6 +45,21 @@ REVIEW_RATE = 0.05  # вероятность, что друг оставил р�
 HUB_RELATIONS = 250
 HUB_HABITS = 12
 HUB_MSGS = 150
+
+# Аватарки: доля синтетических юзеров с собственным pfp_url (у остальных NULL = дефолтная иконка).
+# Ссылки имеют настоящий формат pfp/<user_id>/<32 hex>.<ext>, но САМИХ ФАЙЛОВ в MinIO нет:
+# на фронте такие аватарки будут битыми. Для демо поставь 0.
+PFP_SHARE = 0.3
+
+# Refresh-токены синтетических юзеров: сколько максимум на юзера (0 = не создавать) и срок жизни.
+# REFRESH_TTL_DAYS должен совпадать с REFRESH_TOKEN_EXPIRE_DAYS из проекта.
+MAX_REFRESH_TOKENS = 3
+REFRESH_TTL_DAYS = 30
+
+# Иконки ачивок лежат в отдельном бакете MinIO.
+# True: в achievements.icon_url пишется полный URL, False: только имя файла (streak-7.webp).
+ACHIEVEMENTS_BUCKET = "achievements"
+ACH_ICON_FULL_URL = True
 
 # =====================================================================
 #  ЗНАЧЕНИЯ ENUM В БД
@@ -52,18 +81,23 @@ script = r"""
 --  если что-то упадёт, в БД не останется ничего.
 --
 --  Что создаётся:
---    * N синтетических юзеров (email вида xxx@seed.test)
+--    * три твоих аккаунта из USERS в seed.py (username, email, argon2-хеш пароля), если их ещё нет в БД
+--    * N синтетических юзеров (email вида xxx@seed.test), у части есть pfp_url, у остальных NULL
+--    * refresh-токены синтетических юзеров (часть истекла, часть отозвана)
 --    * дружба / заявки / блокировки (без нарушения инвариантов из доки к UserRelation)
 --    * переписка между друзьями (id сообщений = UUIDv7 от created_at, курсорная пагинация работает)
---    * привычки, совместные привычки, отметки (со стриками), достижения, ревью
---  Три твоих аккаунта (USERNAME_n / UUID_n в seed.py) получают "жирные" данные:
+--    * привычки (с current_streak_days / max_streak_days), совместные привычки, отметки, ревью
+--    * справочник ачивок (STREAK / FRIENDS_COUNT / TOTAL_HABITS) и выданные по реальным данным user_achievements
+--  Три твоих аккаунта получают "жирные" данные:
 --  сотни друзей, входящие и исходящие заявки, блокировки, непрочитанные
 --  сообщения, ~12 привычек с историей, приглашения на совместные привычки.
---  Ничего существующего не удаляется и не меняется.
+--  Если аккаунт с таким username и email уже есть, он остаётся как есть (пароль не перезаписывается),
+--  а данные ему всё равно добавляются. Ничего существующего не удаляется и не меняется.
 --
 --  Допущения (я не видел Uuid7PkMixin и TimeStampMixin):
 --    * TimeStampMixin даёт колонки created_at и updated_at (timestamptz), они заполняются явно
 --    * enum'ы хранятся строками в нижнем регистре (значения задаются в seed.py: ST_*, INV_*)
+--    * achievements.rule_type хранится как есть: 'STREAK' / 'FRIENDS_COUNT' / 'TOTAL_HABITS'
 -- =====================================================================
  
 -- Postgres 14+ кэширует результат LATERAL-вызова по ключу параметров (Memoize) и не замечает random() внутри:
@@ -102,9 +136,11 @@ CREATE TEMP TABLE _u (
   id uuid NOT NULL,
   since timestamptz NOT NULL,   -- с какого момента аккаунт "существует" для генерации дат
   tz text NOT NULL,
-  is_hub boolean NOT NULL       -- true = один из твоих трёх реальных аккаунтов
+  is_hub boolean NOT NULL       -- true = один из твоих трёх аккаунтов (USERS в seed.py)
 ) ON COMMIT DROP;
  
+-- g2 нужен, чтобы id юзера был известен до вставки: он входит в путь аватарки pfp/<user_id>/<hex>.<ext>
+-- (тот же формат, что выдаёт MinioService и проверяет FILE_KEY_RE).
 WITH g AS (
   SELECT i,
          now() - random() * interval '365 days' AS ts,
@@ -113,31 +149,87 @@ WITH g AS (
          d.themes[1 + floor(random() * cardinality(d.themes))::int] AS theme,
          d.tzs[1 + floor(random() * cardinality(d.tzs))::int] AS tz,
          random() AS r_tg,
-         random() AS r_link
+         random() AS r_link,
+         random() AS r_pfp,
+         md5(random()::text || i::text) AS pfp_name,
+         (ARRAY['webp','webp','png','jpeg'])[1 + floor(random() * 4)::int] AS pfp_ext
   FROM generate_series(1, {{N_USERS}}) AS i CROSS JOIN _dict d
+), g2 AS (
+  SELECT g.*, pg_temp.uuid7_at(g.ts) AS uid FROM g
 ), ins AS (
-  INSERT INTO users (id, created_at, updated_at, username, email, password_hash, theme, timezone,
+  INSERT INTO users (id, created_at, updated_at, username, email, password_hash, pfp_url, theme, timezone,
                      telegram_chat_id, telegram_link_token_hash, telegram_link_expires_at)
-  SELECT pg_temp.uuid7_at(ts), ts, ts, username, username || '@seed.test',
+  SELECT uid, ts, ts, username, username || '@seed.test',
          '$2b$12$' || substr(md5(random()::text) || md5(random()::text), 1, 53),
+         CASE WHEN r_pfp < {{PFP_SHARE}}
+              THEN '{{PFP_PREFIX}}pfp/' || uid::text || '/' || pfp_name || '.' || pfp_ext END,
          theme, tz,
          CASE WHEN r_tg < 0.3 THEN 100000000 + floor(random() * 9000000000)::bigint END,
          CASE WHEN r_tg >= 0.3 AND r_link < 0.1 THEN md5(random()::text) || md5(random()::text) END,
          CASE WHEN r_tg >= 0.3 AND r_link < 0.1 THEN now() + random() * interval '1 hour' END
-  FROM g
+  FROM g2
   ON CONFLICT DO NOTHING
   RETURNING id, created_at, timezone
 )
 INSERT INTO _u (id, since, tz, is_hub)
 SELECT id, created_at, timezone, false FROM ins;
  
--- твои три аккаунта (должны уже существовать в users)
+-- ---------- ТВОИ ТРИ АККАУНТА ----------
+-- Данные приходят из USERS в seed.py: username, email и УЖЕ готовый argon2-хеш пароля (хеширует Python).
+-- Аккаунт создаётся с тем же набором колонок, что у обычной регистрации; created_at отодвинут на
+-- HISTORY_DAYS назад, чтобы привычки и дружбы ниже не оказались старше самого аккаунта.
+-- Если username или email уже заняты, вставка молча пропускается (ON CONFLICT DO NOTHING), а ниже
+-- аккаунт находится по паре username + email. Если занят только один из двух, скрипт падает с понятной ошибкой.
+CREATE TEMP TABLE _hubs ON COMMIT DROP AS
+SELECT * FROM (VALUES
+  ('{{USER_1_USERNAME}}', '{{USER_1_EMAIL}}', '{{USER_1_PASSWORD_HASH}}'),
+  ('{{USER_2_USERNAME}}', '{{USER_2_EMAIL}}', '{{USER_2_PASSWORD_HASH}}'),
+  ('{{USER_3_USERNAME}}', '{{USER_3_EMAIL}}', '{{USER_3_PASSWORD_HASH}}')
+) AS v(username, email, password_hash);
+ 
+INSERT INTO users (id, created_at, updated_at, username, email, password_hash, theme, timezone)
+SELECT pg_temp.uuid7_at(s.ts), s.ts, s.ts, h.username, h.email, h.password_hash, 'system', 'UTC'
+FROM _hubs h
+CROSS JOIN (SELECT now() - make_interval(days => {{HISTORY_DAYS}}) AS ts) s
+ON CONFLICT DO NOTHING;
+ 
 INSERT INTO _u (id, since, tz, is_hub)
-SELECT id, now() - make_interval(days => {{HISTORY_DAYS}}), coalesce(timezone, 'UTC'), true
-FROM users
-WHERE id IN ({{HUB_IDS}});   -- UUID_1..UUID_3 из seed.py
+SELECT u.id, now() - make_interval(days => {{HISTORY_DAYS}}), coalesce(u.timezone, 'UTC'), true
+FROM users u
+JOIN _hubs h ON h.username = u.username AND h.email = u.email;
+ 
+DO $$
+BEGIN
+  IF (SELECT count(*) FROM _u WHERE is_hub) <> (SELECT count(*) FROM _hubs) THEN
+    RAISE EXCEPTION 'Не удалось создать или найти все три аккаунта из USERS: username или email уже занят другим аккаунтом';
+  END IF;
+END $$;
  
 CREATE UNIQUE INDEX ON _u (id);
+ 
+-- ---------- REFRESH-ТОКЕНЫ ----------
+-- Только у синтетических юзеров (у твоих трёх аккаунтов токены появятся при настоящем логине).
+-- Хеши случайные: залогиниться такими токенами нельзя, они нужны для объёма и проверки очистки истёкших.
+-- Часть токенов истекла по сроку, ~30% отозваны (logout). MAX_REFRESH_TOKENS = 0 отключает блок.
+INSERT INTO refresh_tokens (id, created_at, updated_at, user_id, token_hash, expires_at, revoked_at)
+SELECT pg_temp.uuid7_at(t.ts), t.ts, t.ts, t.user_id,
+       md5(random()::text || t.user_id::text) || md5(random()::text),
+       t.ts + make_interval(days => {{REFRESH_TTL_DAYS}}),
+       CASE WHEN t.r_rev < 0.3 THEN least(now(), t.ts + random() * interval '10 days') END
+-- Число токенов считается во вложенном запросе uu (random() в списке выбора = своё значение на каждого юзера).
+-- Если поставить random() прямо в аргумент generate_series, он не зависит от юзера, Postgres вычислит его
+-- один раз на весь запрос, и у всех юзеров будет одинаковое число токенов (или ни у кого).
+FROM (
+  SELECT uu.id AS user_id,
+         uu.since + (now() - uu.since) * random() AS ts,
+         random() AS r_rev
+  FROM (
+    SELECT u.id, u.since, floor(random() * ({{MAX_REFRESH_TOKENS}} + 1))::int AS cnt
+    FROM _u u
+    WHERE NOT u.is_hub
+  ) uu
+  CROSS JOIN LATERAL generate_series(1, uu.cnt) AS g
+) t;
  
 -- ---------- ДРУЖБА / ЗАЯВКИ / БЛОКИРОВКИ ----------
 -- Для каждой неупорядоченной пары максимум ОДНА строка, поэтому инварианты UserRelation соблюдены
@@ -174,7 +266,7 @@ FROM _rel r
 JOIN _u a ON a.rn = r.u_rn
 JOIN _u b ON b.rn = r.t_rn;
  
--- друзья в обе стороны (для переписки, совместных привычек, ревью)
+-- друзья в обе стороны (для переписки, совместных привычек, ревью, ачивок)
 CREATE TEMP TABLE _friends ON COMMIT DROP AS
 SELECT u_rn AS a_rn, t_rn AS b_rn, ts FROM _rel WHERE status = '{{ST_ACCEPTED}}'
 UNION ALL
@@ -247,7 +339,8 @@ SELECT pg_temp.uuid7_at(created_at) AS hid,
        CASE WHEN r_p < 0.25 THEN 0.95 + 0.05 * r_p2 ELSE 0.2 + 0.7 * r_p2 END AS p
 FROM calc2;
  
--- суффикс [seed] нужен только чтобы можно было откатить привычки твоих трёх аккаунтов (см. ОЧИСТКА)
+-- суффикс [seed] нужен только чтобы можно было откатить привычки аккаунтов, существовавших до запуска (см. ОЧИСТКА)
+-- current_streak_days / max_streak_days заполняются ниже, когда будут готовы отметки
 INSERT INTO habits (id, created_at, updated_at, creator_id, title, color_hex, visibility, start_date,
                     notification_times, last_reminded_at)
 SELECT h.hid, h.created_at, h.created_at, h.creator_id,
@@ -315,30 +408,90 @@ FROM (
   WHERE d.r_p < s.p
 ) x;
  
--- ---------- ДОСТИЖЕНИЯ (согласованы с реальными стриками: макс. серия по любой привычке) ----------
-INSERT INTO user_achievements (id, created_at, updated_at, user_id, achievement_name)
-SELECT pg_temp.uuid7_at(a.ts), a.ts, a.ts, a.user_id, 'streak_' || a.t
+-- ---------- СЕРИИ (стрики) ----------
+-- _runs: все непрерывные серии отметок (по паре привычка + юзер). Классика "gaps and islands":
+-- дата минус порядковый номер отметки одинакова внутри одной серии.
+CREATE TEMP TABLE _runs ON COMMIT DROP AS
+SELECT x.habit_id, x.user_id, count(*) AS len,
+       min(x.completed_date) AS first_d, max(x.completed_date) AS last_d
 FROM (
-  SELECT g.user_id, g.t,
-         least(now(), (g.dt::timestamp + random() * interval '20 hours')::timestamptz) AS ts
-  FROM (
-    SELECT r.user_id, t.t, min(r.d0 + (t.t - 1)) AS dt
-    FROM (
-      SELECT x.user_id, x.habit_id, min(x.completed_date) AS d0, count(*) AS len
-      FROM (
-        SELECT l.user_id, l.habit_id, l.completed_date,
-               l.completed_date - (row_number() OVER (PARTITION BY l.habit_id, l.user_id
-                                                      ORDER BY l.completed_date))::int AS grp
-        FROM habit_logs l
-        JOIN _h h ON h.hid = l.habit_id
-      ) x
-      GROUP BY x.user_id, x.habit_id, x.grp
-    ) r
-    JOIN unnest(ARRAY[1, 7, 30]) AS t(t) ON r.len >= t.t
-    GROUP BY r.user_id, t.t
-  ) g
-) a
-ON CONFLICT (user_id, achievement_name) DO NOTHING;
+  SELECT l.habit_id, l.user_id, l.completed_date,
+         l.completed_date - (row_number() OVER (PARTITION BY l.habit_id, l.user_id
+                                                ORDER BY l.completed_date))::int AS grp
+  FROM habit_logs l
+  JOIN _h h ON h.hid = l.habit_id
+) x
+GROUP BY x.habit_id, x.user_id, x.grp;
+ 
+-- Стрик привычки считается по отметкам создателя.
+-- current: серия, которая заканчивается сегодня или вчера (если сегодня ещё не отмечено), иначе 0;
+-- max: самая длинная серия за всё время. "Сегодня" берётся в часовом поясе создателя.
+UPDATE habits hb
+SET current_streak_days = s.cur,
+    max_streak_days = s.mx
+FROM (
+  SELECT r.habit_id,
+         max(r.len) AS mx,
+         coalesce(max(r.len) FILTER (WHERE r.last_d >= h.today - 1), 0) AS cur
+  FROM _runs r
+  JOIN _h h ON h.hid = r.habit_id AND h.creator_id = r.user_id
+  GROUP BY r.habit_id
+) s
+WHERE hb.id = s.habit_id;
+ 
+-- ---------- ДОСТИЖЕНИЯ ----------
+-- Справочник в проде создаёт администратор. Для теста добавляем набор по трём типам правил;
+-- уже существующие ачивки (совпало name) не трогаются.
+-- Иконки: имена файлов лежат в frontend/assets/achievements (см. ACH_ICON_FULL_URL в seed.py).
+INSERT INTO achievements (id, created_at, updated_at, name, rule_type, rule_value, color_hex,
+                          requierement, description, icon_url)
+SELECT pg_temp.uuid7_at(now()), now(), now(), v.name, v.rule_type, v.rule_value, v.color_hex,
+       v.req, v.descr, '{{ACH_ICON_BASE}}' || v.icon
+FROM (VALUES
+  ('Первый шаг',          'STREAK',        1,   '#10B981', 'Серия 1 день подряд по любой привычке',   'Первый день в копилке. Начало положено!', 'streak-1.webp'),
+  ('Неделя огня',         'STREAK',        7,   '#F59E0B', 'Серия 7 дней подряд по любой привычке',   'Целая неделя без пропусков',              'streak-7.webp'),
+  ('Месяц без пропусков', 'STREAK',        30,  '#EF4444', 'Серия 30 дней подряд по любой привычке',  'Тридцать дней подряд. Это уже привычка',  'streak-30.webp'),
+  ('Сотня',               'STREAK',        100, '#8B5CF6', 'Серия 100 дней подряд по любой привычке', 'Сто дней подряд. Легенда',                'streak-100.webp'),
+  ('Первый друг',         'FRIENDS_COUNT', 1,   '#3B82F6', 'Иметь 1 друга',                           'Вместе веселее',                          'friends-1.webp'),
+  ('Душа компании',       'FRIENDS_COUNT', 10,  '#EC4899', 'Иметь 10 друзей',                         'Десять друзей поддерживают тебя',         'friends-10.webp'),
+  ('Знаменитость',        'FRIENDS_COUNT', 50,  '#14B8A6', 'Иметь 50 друзей',                         'Тебя знают все',                          'friends-50.webp'),
+  ('Три привычки',        'TOTAL_HABITS',  3,   '#4F46E5', 'Создать 3 привычки',                      'Ты набираешь обороты',                    'habits-3.webp'),
+  ('Пять привычек',       'TOTAL_HABITS',  5,   '#10B981', 'Создать 5 привычек',                      'Целая коллекция полезных дел',            'habits-5.webp'),
+  ('Мастер привычек',     'TOTAL_HABITS',  10,  '#F59E0B', 'Создать 10 привычек',                     'Ты в этом профи',                         'habits-10.webp')
+) AS v(name, rule_type, rule_value, color_hex, req, descr, icon)
+ON CONFLICT (name) DO NOTHING;
+ 
+-- Выдаём ВСЕ ачивки из таблицы (в том числе заведённые админом) с известным rule_type,
+-- условие которых реально выполнено по сгенерированным данным. Время получения = момент,
+-- когда пользователь достиг порога:
+--   STREAK        : день, когда первая подходящая серия дошла до rule_value (+ случайное время в этот день)
+--   FRIENDS_COUNT : момент появления rule_value-го друга
+--   TOTAL_HABITS  : момент создания rule_value-й привычки
+-- Случайные числа считаются один раз в _ach_ev, а не размазываются по INSERT.
+CREATE TEMP TABLE _ach_ev ON COMMIT DROP AS
+SELECT r.user_id, a.id AS achievement_id,
+       least(now(), (((min(r.first_d) + (a.rule_value - 1))::timestamp
+                      + random() * interval '20 hours') AT TIME ZONE u.tz)) AS ts
+FROM _runs r
+JOIN _u u ON u.id = r.user_id
+JOIN achievements a ON a.rule_type = 'STREAK' AND a.rule_value > 0 AND r.len >= a.rule_value
+GROUP BY r.user_id, a.id, a.rule_value, u.tz
+UNION ALL
+SELECT u.id, a.id, f.ts
+FROM (SELECT a_rn, ts, row_number() OVER (PARTITION BY a_rn ORDER BY ts) AS n FROM _friends) f
+JOIN _u u ON u.rn = f.a_rn
+JOIN achievements a ON a.rule_type = 'FRIENDS_COUNT' AND a.rule_value > 0 AND a.rule_value = f.n
+UNION ALL
+SELECT u.id, a.id, h.created_at
+FROM (SELECT creator_rn, created_at, row_number() OVER (PARTITION BY creator_rn ORDER BY created_at) AS n FROM _h) h
+JOIN _u u ON u.rn = h.creator_rn
+JOIN achievements a ON a.rule_type = 'TOTAL_HABITS' AND a.rule_value > 0 AND a.rule_value = h.n;
+ 
+-- если один из твоих аккаунтов существовал до запуска, у него могут быть настоящие ачивки: дубли молча пропускаются
+INSERT INTO user_achievements (id, created_at, updated_at, user_id, achievement_id)
+SELECT pg_temp.uuid7_at(e.ts), e.ts, e.ts, e.user_id, e.achievement_id
+FROM _ach_ev e
+ON CONFLICT (user_id, achievement_id) DO NOTHING;
  
 -- ---------- РЕВЬЮ (друг оценивает привычку друга целиком; 1 = пуш, 0 = шейм) ----------
 -- Ревью привязано к привычке, а не к отметке: пара (ревьюер, привычка) = максимум одно ревью (uq_reviewer_id_habit_log).
@@ -374,55 +527,92 @@ JOIN _u rv ON rv.rn = q.reviewer_rn;
 -- =====================================================================
 --  ОЧИСТКА: убрать всё, что создал скрипт (выполни руками в psql, здесь это просто комментарий)
 --  Юзеры с @seed.test удаляются каскадом вместе со своими связями, сообщениями,
---  привычками, отметками, достижениями и ревью. Привычки твоих трёх аккаунтов
---  помечены суффиксом [seed] и удаляются вторым запросом.
---  Достижения этих трёх аккаунтов не отличить от настоящих; третий запрос
---  снесёт ВСЕ их достижения (если у них были настоящие, не выполняй его).
+--  привычками, отметками, достижениями, refresh-токенами и ревью.
+--
+--  Вариант 1 (аккаунты создал сам скрипт): удалить всё одним запросом. Три твоих аккаунта тоже уйдут,
+--  а вместе с ними каскадом их привычки, отметки, друзья, переписка, ревью, ачивки и токены.
+--  Если уже заходил под ними в приложение и что-то менял руками, это тоже пропадёт.
+--
+--  Вариант 2 (аккаунты существовали ДО запуска и их надо сохранить): удалить только данные скрипта.
+--  Привычки этих аккаунтов помечены суффиксом [seed] и удаляются вторым запросом.
+--  Их связи и переписка с синтетикой уходят каскадом вместе с @seed.test юзерами.
+--  Ачивки этих аккаунтов не отличить от настоящих; третий запрос снесёт ВСЕ их достижения
+--  (если у них были настоящие, не выполняй его).
+--
+--  Справочник achievements скриптом не чистится: это обычные данные, их мог завести и админ.
+--  Если нужно убрать и его: DELETE FROM achievements WHERE name IN ('Первый шаг', ...);
+--  (user_achievements удалятся каскадом).
 --
 --  Каскадное удаление привычек ищет их ревью по reviews.habit_id, а отдельного индекса по этой колонке нет
 --  (unique начинается с reviewer_id): на ~13 тыс. привычек очистка занимает около 8 секунд, с индексом ниже около 1.
 --  Индекс полезен и самому приложению (ревью привычки ищутся по habit_id), так что его можно оставить.
 -- =====================================================================
 -- CREATE INDEX IF NOT EXISTS ix_reviews_habit_id ON reviews (habit_id);
+--
+-- Вариант 1:
+-- BEGIN;
+-- DELETE FROM users WHERE email LIKE '%@seed.test'
+--                      OR username IN ('{{USER_1_USERNAME}}', '{{USER_2_USERNAME}}', '{{USER_3_USERNAME}}');
+-- COMMIT;
+--
+-- Вариант 2:
 -- BEGIN;
 -- DELETE FROM habits WHERE title LIKE '% [seed]';
 -- DELETE FROM users WHERE email LIKE '%@seed.test';
--- DELETE FROM user_achievements WHERE user_id IN ({{HUB_IDS}});
+-- DELETE FROM user_achievements WHERE user_id IN (SELECT id FROM users WHERE username IN ('{{USER_1_USERNAME}}', '{{USER_2_USERNAME}}', '{{USER_3_USERNAME}}'));
 -- COMMIT;
 """
 
-HUBS = [(USERNAME_1, UUID_1), (USERNAME_2, UUID_2), (USERNAME_3, UUID_3)]
-
-TABLES = "users, user_relations, messages, habits, shared_habit_users, habit_logs, user_achievements, reviews"
+TABLES = (
+    "users, refresh_tokens, user_relations, messages, habits, shared_habit_users, "
+    "habit_logs, achievements, user_achievements, reviews"
+)
 
 SUMMARY_SQL = """
 SELECT 'users (синтетика)' AS tbl, count(*) AS rows FROM users WHERE email LIKE '%@seed.test'
 UNION ALL SELECT 'users (всего)', count(*) FROM users
+UNION ALL SELECT 'refresh_tokens', count(*) FROM refresh_tokens
 UNION ALL SELECT 'user_relations', count(*) FROM user_relations
 UNION ALL SELECT 'messages', count(*) FROM messages
 UNION ALL SELECT 'habits', count(*) FROM habits
 UNION ALL SELECT 'shared_habit_users', count(*) FROM shared_habit_users
 UNION ALL SELECT 'habit_logs', count(*) FROM habit_logs
+UNION ALL SELECT 'achievements', count(*) FROM achievements
 UNION ALL SELECT 'user_achievements', count(*) FROM user_achievements
 UNION ALL SELECT 'reviews', count(*) FROM reviews
 """
 
-
-def parse_hub_ids() -> list[uuid.UUID]:
-    ids: list[uuid.UUID] = []
-    for i, (name, raw) in enumerate(HUBS, start=1):
-        if not name.strip() or not raw.strip():
-            raise ValueError(f"[-] USERNAME_{i} и UUID_{i} должны быть заполнены!")
-        try:
-            ids.append(uuid.UUID(raw.strip()))
-        except ValueError:
-            raise ValueError(f"[-] UUID_{i} = {raw!r} не UUID") from None
-    if len(set(ids)) != len(ids):
-        raise ValueError("[-] UUID_1, UUID_2 и UUID_3 должны быть разными!")
-    return ids
+# в SQL-шаблоне зашиты токены USER_1_*, USER_2_*, USER_3_*, поэтому ключи USERS должны быть именно такими
+USER_KEYS = ("USER_1", "USER_2", "USER_3")
+USERNAME_MAX_LEN = 16  # users.username = String(16)
 
 
-def render_script(hub_ids: list[uuid.UUID]) -> str:
+def validate_users() -> None:
+    if tuple(USERS) != USER_KEYS:
+        raise ValueError(f"[-] В USERS должны быть ровно ключи {', '.join(USER_KEYS)}, сейчас: {', '.join(USERS)}")
+
+    for key, user in USERS.items():
+        for field in ("username", "email", "password"):
+            if not str(user.get(field, "")).strip():
+                raise ValueError(f"[-] USERS[{key!r}]: поле {field!r} должно быть заполнено!")
+        if len(user["username"]) > USERNAME_MAX_LEN:
+            raise ValueError(f"[-] USERS[{key!r}]: username длиннее {USERNAME_MAX_LEN} символов")
+
+    for field in ("username", "email"):
+        values = [user[field] for user in USERS.values()]
+        if len(set(values)) != len(values):
+            raise ValueError(f"[-] В USERS у разных аккаунтов совпадает {field}!")
+
+
+async def hash_users() -> None:
+    # argon2 считается в потоках (create_password -> asyncio.to_thread), три пароля хешируются параллельно
+    async with asyncio.TaskGroup() as tg:
+        tasks = {key: tg.create_task(create_password(user["password"])) for key, user in USERS.items()}
+    for key, task in tasks.items():
+        USERS[key]["password_hash"] = task.result()
+
+
+def render_script() -> str:
     enums = {
         "ST_PENDING": ST_PENDING,
         "ST_ACCEPTED": ST_ACCEPTED,
@@ -433,6 +623,26 @@ def render_script(hub_ids: list[uuid.UUID]) -> str:
     for key, val in enums.items():
         if not re.fullmatch(r"\w+", val):  # значения идут в SQL внутри кавычек
             raise ValueError(f"[-] {key} = {val!r}: допустимы только буквы, цифры и _")
+
+    # адреса аватарок и иконок строим из тех же настроек MinIO, что и сервис
+    minio = get_minio_settings()
+    urls = {
+        "PFP_PREFIX": f"{minio.endpoint}/{minio.bucket_name}/",
+        "ACH_ICON_BASE": f"{minio.endpoint}/{ACHIEVEMENTS_BUCKET}/" if ACH_ICON_FULL_URL else "",
+    }
+    for key, val in urls.items():
+        if "'" in val or "{{" in val:  # значения идут в SQL внутри кавычек
+            raise ValueError(f"[-] {key} = {val!r}: нельзя использовать ' и {{")
+
+    # USER_1 -> {{USER_1_USERNAME}}, {{USER_1_EMAIL}}, {{USER_1_PASSWORD_HASH}} и так далее.
+    # Знак $ в argon2-хеше безопасен: значение стоит внутри обычных одинарных кавычек.
+    users = {}
+    for key, user in USERS.items():
+        for field in ("username", "email", "password_hash"):
+            val = user[field]
+            if "'" in val or "{{" in val:  # значения идут в SQL внутри кавычек
+                raise ValueError(f"[-] USERS[{key!r}][{field!r}]: нельзя использовать ' и двойную фигурную скобку")
+            users[f"{key}_{field.upper()}"] = val
 
     values = {
         "N_USERS": N_USERS,
@@ -446,7 +656,11 @@ def render_script(hub_ids: list[uuid.UUID]) -> str:
         "HUB_RELATIONS": HUB_RELATIONS,
         "HUB_HABITS": HUB_HABITS,
         "HUB_MSGS": HUB_MSGS,
-        "HUB_IDS": ", ".join(f"'{u}'" for u in hub_ids),  # uuid.UUID уже прошёл разбор, кавычки не сломать
+        "PFP_SHARE": PFP_SHARE,
+        "MAX_REFRESH_TOKENS": MAX_REFRESH_TOKENS,
+        "REFRESH_TTL_DAYS": REFRESH_TTL_DAYS,
+        **users,
+        **urls,
         **enums,
     }
     sql = script
@@ -459,28 +673,12 @@ def render_script(hub_ids: list[uuid.UUID]) -> str:
     return sql
 
 
-async def check_hubs(conn, hub_ids: list[uuid.UUID]) -> None:
-    rows = await conn.fetch("SELECT id, username FROM users WHERE id = ANY($1::uuid[])", hub_ids)
-    found = {str(r["id"]): r["username"] for r in rows}
-
-    problems = []
-    for i, ((name, _), hub_id) in enumerate(zip(HUBS, hub_ids), start=1):
-        actual = found.get(str(hub_id))
-        if actual is None:
-            problems.append(f"[-]  UUID_{i} = {hub_id}: такого юзера нет в БД")
-        elif actual != name.strip():
-            problems.append(f"[-]  UUID_{i} = {hub_id}: в БД это {actual!r}, а в USERNAME_{i} указано {name!r}")
-    if problems:
-        raise RuntimeError(
-            "[-] Аккаунты из USERNAME_n / UUID_n не совпадают с БД (после пересоздания БД обнови их):\n"
-            + "\n".join(problems)
-        )
-
-
 async def run_seed():
     try:
-        hub_ids = parse_hub_ids()
-        sql = render_script(hub_ids)
+        validate_users()
+        print("[+] Хеширование паролей . . .")
+        await hash_users()
+        sql = render_script()
     except (ValueError, RuntimeError) as e:
         raise SystemExit(f"[-] Ошибка в настройках seed.py: {e}")
 
@@ -491,8 +689,6 @@ async def run_seed():
     conn = await asyncpg.connect(formatted_dsn)
 
     try:
-        await check_hubs(conn, hub_ids)
-
         print("[+] Выполенение (до 60 секунд) . . .")
         started = time.perf_counter()
         async with conn.transaction():

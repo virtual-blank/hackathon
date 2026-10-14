@@ -1,10 +1,10 @@
-import string
 import uuid
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr, field_validator
 
+from src.achievements.schemas import AchievementOutputSchema
 from src.users.pfp.minio import DEFAULT_PFP_URL
 
 
@@ -47,16 +47,33 @@ class UserOutputSchema(BaseModel):
     email: EmailStr
     telegram_chat_id: int | None = None
     pfp_url: str
+    achievements: list[AchievementOutputSchema] = []
 
     @field_validator("pfp_url", mode="before")
     @classmethod
     def set_default_pfp(cls, v: str | None) -> str:
         return v or DEFAULT_PFP_URL
 
+    @field_validator("achievements", mode="before")
+    @classmethod
+    def extract_achievements(cls, v: Any) -> list[Any]:
+        if not v:
+            return []
+        return [
+            item.achievement if hasattr(item, "achievement") else item
+            for item in v
+            if getattr(item, "achievement", item) is not None
+        ]
+
 
 class TokenSchema(BaseModel):
     access_token: str
     token_type: str = "Bearer"
+    refresh_token: str
+
+
+class RefreshTokenSchema(BaseModel):
+    refresh_token: str
 
 
 class AuthOutputSchema(BaseModel):

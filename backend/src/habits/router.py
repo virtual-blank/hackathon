@@ -1,21 +1,34 @@
 import uuid
 from datetime import date
 
-from fastapi import APIRouter, status, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, status
 
-from src.auth.deps import SessionDep, CurrentUserIdDep
-from src.habits.schemas import HabitOutputSchema, HabitCreateSchema, HabitUpdateSchema, HabitLogOutputSchema, \
-    HabitLogCreateSchema
-from src.habits.service import HabitsService, HabitLogService
+from src.achievements.service import AchievementsService
+from src.auth.deps import CurrentUserDep, CurrentUserIdDep, SessionDep
+from src.habits.schemas import (
+    HabitCreateSchema,
+    HabitLogCreateSchema,
+    HabitLogOutputSchema,
+    HabitOutputSchema,
+    HabitUpdateSchema,
+    MarkedHabitOutputSchema,
+)
+from src.habits.service import HabitLogService, HabitsService
 
 router = APIRouter(prefix="/habits", tags=["🏃 Habits"])
 
+
 # == CREATE HABIT ==
 @router.post("/", status_code=status.HTTP_201_CREATED, response_model=HabitOutputSchema, description="Create Habit")
-async def create_habit(habit_data: HabitCreateSchema, user_id: CurrentUserIdDep, session: SessionDep):
+async def create_habit(
+    habit_data: HabitCreateSchema, user_id: CurrentUserIdDep, session: SessionDep, bt: BackgroundTasks
+):
     service = HabitsService(session=session)
     try:
-        return await service.create_habit(habit_data=habit_data, user_id=user_id)
+        new_habit = await service.create_habit(habit_data=habit_data, user_id=user_id)
+        ach_service = AchievementsService(session=session)
+        bt.add_task(ach_service.check_total_habits_count_achievements, user_id=user_id)
+        return new_habit
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -145,7 +158,9 @@ async def get_habit(user_id: CurrentUserIdDep, habit_id: uuid.UUID, session: Ses
 
 
 # == EDIT HABIT ==
-@router.patch("/{habit_id}", status_code=status.HTTP_200_OK, response_model=HabitOutputSchema, description="Update Habit")
+@router.patch(
+    "/{habit_id}", status_code=status.HTTP_200_OK, response_model=HabitOutputSchema, description="Update Habit"
+)
 async def update_habit(user_id: CurrentUserIdDep, habit_id: uuid.UUID, data: HabitUpdateSchema, session: SessionDep):
     service = HabitsService(session=session)
     try:
@@ -175,6 +190,32 @@ async def delete_habit(user_id: CurrentUserIdDep, habit_id: uuid.UUID, session: 
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Habit not found")
         return {"detail": "Habit deleted"}
 
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
+
+
+# == COMPLETE OR UNCOMPLETE HABIT ==
+@router.patch(
+    "/{habit_id}/toggle",
+    status_code=status.HTTP_200_OK,
+    response_model=MarkedHabitOutputSchema,
+    description="Click on habit (complete or uncomplete)",
+)
+async def mark_habit(current_user: CurrentUserDep, session: SessionDep, habit_id: uuid.UUID, bt: BackgroundTasks):
+    service = HabitsService(session=session)
+    try:
+        updated_habit = await service.mark_habit(habit_id=habit_id, current_user=current_user)
+        ach_service = AchievementsService(session=session)
+        bt.add_task(
+            ach_service.check_streak_achievements,
+            user_id=current_user.id,
+            streak_days=updated_habit.habit.current_streak_days,
+        )
+        return updated_habit
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except HTTPException:

@@ -81,8 +81,10 @@ services:
       - .env
     environment:
       BUCKET: ${MINIO_BUCKET_NAME}
+      ACHIEVEMENTS_BUCKET: achievements
     volumes:
       - ./frontend/assets/defaults:/defaults:ro
+      - ./frontend/assets/achievements:/achievements:ro
     networks:
       - app_network
     entrypoint: >
@@ -91,7 +93,10 @@ services:
       mc mb --ignore-existing local/$$BUCKET &&
       mc anonymous set download local/$$BUCKET/defaults &&
       mc anonymous set download local/$$BUCKET/pfp &&
-      mc cp /defaults/default-pfp.webp local/$$BUCKET/defaults/default-pfp.webp
+      mc cp /defaults/default-pfp.webp local/$$BUCKET/defaults/default-pfp.webp &&
+      mc mb --ignore-existing local/$$ACHIEVEMENTS_BUCKET &&
+      mc anonymous set download local/$$ACHIEVEMENTS_BUCKET &&
+      mc mirror --overwrite /achievements local/$$ACHIEVEMENTS_BUCKET
       "
 
 volumes:

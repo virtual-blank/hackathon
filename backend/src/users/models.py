@@ -2,14 +2,16 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from sqlalchemy import BigInteger, DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
 from database.db import Base
 from database.enum import str_enum
 from database.mixins import TimeStampMixin, Uuid7PkMixin
-from sqlalchemy import BigInteger, DateTime, ForeignKey, String, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.users.enums import Theme
 
 if TYPE_CHECKING:
+    from src.achievements.models import Achievement
     from src.habits.models import Habit, HabitLog, SharedHabitUser
     from src.social.models import Message, UserRelation
 
@@ -55,6 +57,10 @@ class User(Uuid7PkMixin, TimeStampMixin, Base):
         back_populates="receiver",
         foreign_keys="Message.receiver_id",
     )
+    refresh_tokens: Mapped[list["RefreshToken"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
 
 class UserAchievement(Uuid7PkMixin, TimeStampMixin, Base):
@@ -63,11 +69,25 @@ class UserAchievement(Uuid7PkMixin, TimeStampMixin, Base):
     __tablename__ = "user_achievements"
 
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
-    # Код, а не текст для людей: "streak_1", "streak_7", "streak_30" ...
-    achievement_name: Mapped[str] = mapped_column(String(32))
+    achievement_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("achievements.id", ondelete="CASCADE"))
 
     user: Mapped["User"] = relationship(back_populates="achievements")
+    achievement: Mapped["Achievement"] = relationship()
 
     __table_args__ = (
-        UniqueConstraint("user_id", "achievement_name"),  # индекс по user_id получается бесплатно
+        UniqueConstraint(
+            "user_id", "achievement_id", name="(uq_user_id_achievement_id) "
+        ),  # индекс по user_id получается бесплатно
     )
+
+
+class RefreshToken(Uuid7PkMixin, TimeStampMixin, Base):
+    """Refresh-токен. Opaque-строка, хранится в БД, отзывается через logout."""
+
+    __tablename__ = "refresh_tokens"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    user: Mapped["User"] = relationship(back_populates="refresh_tokens")

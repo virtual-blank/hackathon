@@ -7,6 +7,7 @@ from src.users.models import User, UserAchievement
 from src.habits.models import Habit, HabitLog, SharedHabitUser
 from src.social.models import UserRelation, Message
 from src.feed.models import Review
+from src.achievements.models import Achievement
 # == MODELS ==
 
 # == ROUTERS ==
@@ -14,6 +15,7 @@ from src.users.router import router as users_router
 from src.feed.router import router as feed_router
 from src.users.pfp.router import router as users_pfp_router
 from src.habits.router import router as habits_router
+from src.friends.router import router as friends_router
 # == ROUTERS ==
 
 ROUTERS_PREFIX = "/api/v1"
@@ -37,6 +39,8 @@ app.include_router(users_router, prefix=ROUTERS_PREFIX)
 app.include_router(feed_router, prefix=ROUTERS_PREFIX)
 app.include_router(users_pfp_router, prefix=ROUTERS_PREFIX)
 app.include_router(habits_router, prefix=ROUTERS_PREFIX)
+app.include_router(friends_router, prefix=ROUTERS_PREFIX)
+
 
 @app.get("/health", tags=["🩺 System"], description="Healthcheck")
 async def health() -> dict[str, str]:
@@ -45,4 +49,4 @@ async def health() -> dict[str, str]:
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="127.0.0.1", port=8080, reload=True) 
+    uvicorn.run("main:app", host="127.0.0.1", port=8080, reload=True)
