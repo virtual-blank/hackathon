@@ -5,6 +5,7 @@ from typing import Annotated, Any
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr, field_validator
 
 from src.achievements.schemas import AchievementOutputSchema
+from src.users.enums import Theme, TimezoneEnum
 from src.users.pfp.minio import DEFAULT_PFP_URL
 
 
@@ -27,16 +28,26 @@ class UserLoginSchema(BaseModel):
 
     @field_validator("username")
     @classmethod
-    def username_check(cls, v: str) -> str:
-        if not v.isalnum():
-            raise ValueError("Имя пользователя должно содержать только буквы или цифры")
+    def username_lowercase(cls, v: str) -> str:
         return v.lower()
 
 
 class UserUpdateSchema(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
-    username: str | None = None
-    password: SecretStr | None = None
+    email: EmailStr | None = None
+    username: Annotated[str, Field(min_length=5, max_length=16, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")] | None = None
+    timezone: TimezoneEnum | None = None
+    theme: Theme | None = None
+
+    @field_validator("username")
+    @classmethod
+    def username_lowercase(cls, v: str | None) -> str | None:
+        return v.lower() if v else None
+
+
+class UserPasswordUpdateSchema(BaseModel):
+    current_password: SecretStr
+    new_password: SecretStr
 
 
 class UserOutputSchema(BaseModel):
@@ -45,6 +56,8 @@ class UserOutputSchema(BaseModel):
     created_at: datetime
     username: str
     email: EmailStr
+    theme: Theme
+    timezone: str
     telegram_chat_id: int | None = None
     pfp_url: str
     achievements: list[AchievementOutputSchema] = []

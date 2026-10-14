@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import joinedload, selectinload
 
 from src.users.models import RefreshToken, User, UserAchievement
 
@@ -11,6 +11,12 @@ from src.users.models import RefreshToken, User, UserAchievement
 class UsersRepository:
     def __init__(self, session: AsyncSession):
         self.session = session
+
+    async def _commit(self):
+        await self.session.commit()
+    
+    async def _rollback(self):
+        await self.session.rollback()
 
     async def create_user(self, username: str, password_hash: str, email: str) -> User:
         new_user = User(username=username, password_hash=password_hash, email=email, achievements=[])
@@ -80,3 +86,22 @@ class UsersRepository:
         )
         await self.session.execute(stmt)
         await self.session.commit()
+
+    async def edit_profile(
+        self,
+        user_id: uuid.UUID,
+        user_data_dict: dict,
+    ):
+        stmt = (
+            update(User)
+            .where(User.id == user_id)
+            .values(
+                **user_data_dict
+            )
+            .returning(User)
+            .options(selectinload(User.achievements).joinedload(UserAchievement.achievement))
+        )
+        result = await self.session.execute(stmt)
+        await self._commit()
+        return result.scalar_one_or_none()
+
