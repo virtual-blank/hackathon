@@ -27,9 +27,7 @@ class UserLoginSchema(BaseModel):
 
     @field_validator("username")
     @classmethod
-    def username_check(cls, v: str) -> str:
-        if not v.isalnum():
-            raise ValueError("Имя пользователя должно содержать только буквы или цифры")
+    def username_lowercase(cls, v: str) -> str:
         return v.lower()
 
 
