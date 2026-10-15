@@ -14,7 +14,7 @@ async def get_feed(
     current_user_id: CurrentUserIdDep,
     session: SessionDep,
     limit: int = Query(default=50, description="Количество постов на странице"),
-    offset: int = Query(default=1),
+    offset: int = Query(default=0),
 ):
     service = FeedService(session=session)
     try:

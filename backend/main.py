@@ -15,6 +15,7 @@ from src.users.router import router as users_router
 from src.feed.router import router as feed_router
 from src.users.pfp.router import router as users_pfp_router
 from src.habits.router import router as habits_router
+from src.social.router import router as social_router
 from src.friends.router import router as friends_router
 # == ROUTERS ==
 
@@ -39,6 +40,7 @@ app.include_router(users_router, prefix=ROUTERS_PREFIX)
 app.include_router(feed_router, prefix=ROUTERS_PREFIX)
 app.include_router(users_pfp_router, prefix=ROUTERS_PREFIX)
 app.include_router(habits_router, prefix=ROUTERS_PREFIX)
+app.include_router(social_router, prefix=ROUTERS_PREFIX)
 app.include_router(friends_router, prefix=ROUTERS_PREFIX)
 
 

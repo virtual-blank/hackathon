@@ -128,6 +128,7 @@ class HabitLogRepository:
         result = await self.session.execute(stmt)
         return list(result.scalars().unique().all())
 
+
     # async def delete_log(
     #     self,
     #     *,

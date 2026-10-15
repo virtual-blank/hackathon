@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import asyncio
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,7 +14,7 @@ from src.auth.security import (
 )
 from src.users.models import User
 from src.users.repository import UsersRepository
-from src.users.schemas import AuthOutputSchema, TokenSchema, UserCreateSchema, UserLoginSchema, UserOutputSchema
+from src.users.schemas import AuthOutputSchema, TokenSchema, UserCreateSchema, UserLoginSchema, UserOutputSchema, UserUpdateSchema, UserPasswordUpdateSchema
 
 
 class UsersService:
@@ -88,7 +89,7 @@ class UsersService:
         if token_dao.expires_at < datetime.now(timezone.utc):
             raise ValueError("Refresh-токен истёк")
 
-        user_dao = await self.session.get(User, token_dao.user_id)
+        user_dao = await self.repo.get_user_by_id(user_id=token_dao.user_id)
         if not user_dao:
             raise ValueError("Пользователь не найден")
 
@@ -104,3 +105,72 @@ class UsersService:
         deleted = await self.repo.delete_user(user_id=user_id)
         if not deleted:
             raise ValueError("Пользователь не найден")
+
+    async def get_me(
+        self,
+        user_id: uuid.UUID
+    ):
+        user_dao = await self.repo.get_user_by_id(user_id=user_id)
+        return UserOutputSchema.model_validate(user_dao)
+    
+    async def edit_profile(
+        self,
+        user_id: uuid.UUID,
+        user_data: UserUpdateSchema
+    ):  
+        user_data_dict = user_data.model_dump(exclude_unset=True, exclude_none=True)
+        if not user_data_dict:
+            raise ValueError("Данные не могут быть пустые")
+        try:
+            updated_user =  await self.repo.edit_profile(
+                user_id = user_id,
+                user_data_dict=user_data_dict
+            )
+            if not updated_user:
+                raise ValueError("Не удалось внести изменения")
+            
+            return UserOutputSchema.model_validate(updated_user)
+
+        except IntegrityError as exc:
+            exc_text = str(exc.orig)
+            await self.repo._rollback()
+            if "username" in exc_text:
+                raise ValueError("Этот юзернейм занят")
+            if "email" in exc_text:
+                raise ValueError("Этот имейл уже кем-то используется")
+            if "timezone" in exc_text:
+                raise ValueError("Часовой пояс указан не верно")
+            if "theme" in exc_text:
+                raise ValueError("Оформление указано не верно")
+            else:
+                raise
+
+    async def change_password(
+        self,
+        user_id: uuid.UUID,
+        new_password_dto: UserPasswordUpdateSchema
+    ):
+        current_password = new_password_dto.current_password.get_secret_value()
+        new_password = new_password_dto.new_password.get_secret_value()
+        
+        new_password_hash = await create_password(password=new_password)
+
+        if not new_password_hash:
+            raise ValueError("Не удалось проверить пароли")
+        
+        user_dao = await self.repo.get_user_by_id(user_id = user_id)
+        if not user_dao: 
+            raise ValueError("Пользователь не найден")
+
+        is_password_correct = await verify_password(
+            password=current_password,
+            hashed_password=user_dao.password_hash
+        )
+        if not is_password_correct:
+            raise ValueError("Текущий пароль не верный")
+        
+        user_dao.password_hash = new_password_hash
+        await self.repo._commit()
+        
+        return await self._issue_tokens(user_dao)
+        

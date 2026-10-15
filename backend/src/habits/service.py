@@ -75,6 +75,7 @@ class HabitLogService:
         uncompleted_habits = await self.repo.get_uncompleted_habits_by_date(user_id=user_id, target_date=target_date)
         return [HabitOutputSchema.model_validate(uncompleted_habit) for uncompleted_habit in uncompleted_habits]
 
+
     # async def delete_log(self, user_id: uuid.UUID, log_id: uuid.UUID):
     #     return await self.repo.delete_log(user_id=user_id, log_id=log_id)
 

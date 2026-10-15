@@ -8,7 +8,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from database.db import Base
 from database.enum import str_enum
 from database.mixins import TimeStampMixin, Uuid7PkMixin
-from src.users.enums import Theme
+from src.users.enums import Theme, TimezoneEnum
 
 if TYPE_CHECKING:
     from src.achievements.models import Achievement
@@ -26,6 +26,8 @@ class User(Uuid7PkMixin, TimeStampMixin, Base):
     # Настройки (вместо отдельной таблицы users_settings)
     theme: Mapped[Theme] = mapped_column(str_enum(Theme), default=Theme.SYSTEM, server_default=Theme.SYSTEM.value)
 
+    #todo: добавить позже:
+    # timezone: Mapped[TimezoneEnum] = mapped_column(server_default=TimezoneEnum.UTC)
     timezone: Mapped[str] = mapped_column(String(64), server_default="UTC")
 
     # Telegram. chat_id у Telegram числовой и может быть больше int32.
