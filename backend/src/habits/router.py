@@ -1,5 +1,6 @@
 import uuid
 from datetime import date
+from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, status
 
@@ -7,7 +8,6 @@ from src.achievements.service import AchievementsService
 from src.auth.deps import CurrentUserDep, CurrentUserIdDep, SessionDep
 from src.habits.schemas import (
     HabitCreateSchema,
-    HabitLogCreateSchema,
     HabitLogOutputSchema,
     HabitOutputSchema,
     HabitUpdateSchema,
@@ -19,7 +19,12 @@ router = APIRouter(prefix="/habits", tags=["🏃 Habits"])
 
 
 # == CREATE HABIT ==
-@router.post("/", status_code=status.HTTP_201_CREATED, response_model=HabitOutputSchema, description="Create Habit")
+@router.post(
+    "",
+    status_code=status.HTTP_201_CREATED,
+    response_model=HabitOutputSchema,
+    description="Create Habit",
+)
 async def create_habit(
     habit_data: HabitCreateSchema, user_id: CurrentUserIdDep, session: SessionDep, bt: BackgroundTasks
 ):
@@ -43,56 +48,46 @@ async def create_habit(
 
 
 # == GET HABITS ==
-@router.get("/", status_code=status.HTTP_200_OK, response_model=list[HabitOutputSchema], description="Get Habits")
-async def get_habits(user_id: CurrentUserIdDep, session: SessionDep):
+@router.get(
+    "",
+    status_code=status.HTTP_200_OK,
+    response_model=list[HabitOutputSchema],
+    description="Get Habits",
+)
+async def get_habits(
+        user_id: CurrentUserIdDep,
+        session: SessionDep,
+        target_user_id: uuid.UUID | None = Query(default=None),
+        start_date: date | None = Query(default=None),
+        end_date: date | None = Query(default=None),
+        habit_status: Literal["completed", "uncompleted"] | None = Query(default=None, alias="status"),
+        limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+):
     service = HabitsService(session=session)
     try:
-        return await service.get_habits(user_id=user_id)
+        return await service.get_habits(
+            user_id=user_id,
+            target_user_id=target_user_id,
+            start_date=start_date,
+            end_date=end_date,
+            status=habit_status,
+            limit=limit,
+            offset=offset,
+        )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-    except Exception:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
-
-
-# == MARK HABIT COMPLETED ==
-@router.post("/{habit_id}/logs", status_code=status.HTTP_201_CREATED, response_model=HabitLogOutputSchema, description="Mark Habit Completed")
-async def mark_completed(data: HabitLogCreateSchema, user_id: CurrentUserIdDep, habit_id: uuid.UUID, session: SessionDep):
-    service = HabitLogService(session=session)
-    try:
-        return await service.mark_completed(user_id=user_id, habit_id=habit_id, completed_date=data.completed_date)
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-    except Exception:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
-
-
-# == REMOVE HABIT COMPLETION ==
-@router.delete("/{habit_id}/logs", status_code=status.HTTP_200_OK, description="Remove habit completion")
-async def remove_completion(
-        user_id: CurrentUserIdDep,
-        habit_id: uuid.UUID,
-        session: SessionDep,
-        completed_date: date | None = Query(default=None),
-):
-    service = HabitLogService(session=session)
-    try:
-        remove = await service.remove_completion(user_id=user_id, habit_id=habit_id, completed_date=completed_date)
-        if not remove:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Habit Log does not exist",
-            )
-        return {"detail": "Mark removed"}
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-    except HTTPException:
-        raise
     except Exception:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
 
 # == GET HABIT LOGS ==
-@router.get("/logs/", status_code=status.HTTP_200_OK, response_model=list[HabitLogOutputSchema], description="Get habit logs")
+@router.get(
+    "/logs",
+    status_code=status.HTTP_200_OK,
+    response_model=list[HabitLogOutputSchema],
+    description="Get habit logs",
+)
 async def get_logs_in_range(
         user_id: CurrentUserIdDep,
         date_from: date, date_to: date,
@@ -118,7 +113,12 @@ async def get_logs_in_range(
 
 
 # == GET COMPLETED HABITS ==
-@router.get("/logs/completed/", status_code=status.HTTP_200_OK, response_model=list[HabitOutputSchema], description="Get completed habits")
+@router.get(
+    "/logs/completed",
+    status_code=status.HTTP_200_OK,
+    response_model=list[HabitOutputSchema],
+    description="Get completed habits",
+)
 async def get_completed_habits(user_id: CurrentUserIdDep, target_date: date, session: SessionDep):
     service = HabitLogService(session=session)
     try:
@@ -130,7 +130,12 @@ async def get_completed_habits(user_id: CurrentUserIdDep, target_date: date, ses
 
 
 # == GET UNCOMPLETED HABITS ==
-@router.get("/logs/uncompleted/", status_code=status.HTTP_200_OK, response_model=list[HabitOutputSchema], description="Get uncompleted habits")
+@router.get(
+    "/logs/uncompleted",
+    status_code=status.HTTP_200_OK,
+    response_model=list[HabitOutputSchema],
+    description="Get uncompleted habits",
+)
 async def get_uncompleted_habits(user_id: CurrentUserIdDep, target_date: date, session: SessionDep):
     service = HabitLogService(session=session)
     try:
@@ -142,7 +147,12 @@ async def get_uncompleted_habits(user_id: CurrentUserIdDep, target_date: date, s
 
 
 # == GET HABIT ==
-@router.get("/{habit_id}", status_code=status.HTTP_200_OK, response_model=HabitOutputSchema, description="Get Habit")
+@router.get(
+    "/{habit_id}",
+    status_code=status.HTTP_200_OK,
+    response_model=HabitOutputSchema,
+    description="Get Habit",
+)
 async def get_habit(user_id: CurrentUserIdDep, habit_id: uuid.UUID, session: SessionDep):
     service = HabitsService(session=session)
     try:
@@ -159,7 +169,10 @@ async def get_habit(user_id: CurrentUserIdDep, habit_id: uuid.UUID, session: Ses
 
 # == EDIT HABIT ==
 @router.patch(
-    "/{habit_id}", status_code=status.HTTP_200_OK, response_model=HabitOutputSchema, description="Update Habit"
+    "/{habit_id}",
+    status_code=status.HTTP_200_OK,
+    response_model=HabitOutputSchema,
+    description="Update Habit",
 )
 async def update_habit(user_id: CurrentUserIdDep, habit_id: uuid.UUID, data: HabitUpdateSchema, session: SessionDep):
     service = HabitsService(session=session)

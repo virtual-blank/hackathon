@@ -4,6 +4,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.friends.repository import FriendsRepository
+from src.habits.enums import Visibility
 from src.habits.models import Habit
 from src.habits.repository import HabitLogRepository, HabitsRepository
 from src.habits.schemas import (
@@ -13,6 +15,7 @@ from src.habits.schemas import (
     HabitUpdateSchema,
     MarkedHabitOutputSchema,
 )
+from src.social.enums import RelationStatus
 from src.users.models import User
 
 class HabitLogService:
@@ -72,27 +75,27 @@ class HabitLogService:
         uncompleted_habits = await self.repo.get_uncompleted_habits_by_date(user_id=user_id, target_date=target_date)
         return [HabitOutputSchema.model_validate(uncompleted_habit) for uncompleted_habit in uncompleted_habits]
 
-    async def delete_log(self, user_id: uuid.UUID, log_id: uuid.UUID):
-        return await self.repo.delete_log(user_id=user_id, log_id=log_id)
+    # async def delete_log(self, user_id: uuid.UUID, log_id: uuid.UUID):
+    #     return await self.repo.delete_log(user_id=user_id, log_id=log_id)
 
-    async def remove_completion(self, user_id: uuid.UUID, habit_id: uuid.UUID, completed_date: date | None = None):
-        user = await self.session.get(User, user_id)
-        if user is None:
-            raise ValueError("Пользователь не найден")
-        if not user.timezone:
-            raise ValueError("Часовой пояс пользователя не указан")
-
-        try:
-            user_timezone = ZoneInfo(user.timezone)
-        except ZoneInfoNotFoundError:
-            raise ValueError("Некорректный часовой пояс пользователя")
-
-        date_today = datetime.now(user_timezone).date()
-        if completed_date is None:
-            completed_date = date_today
-
-        log = await self.repo.remove_completion(user_id=user_id, habit_id=habit_id, completed_date=completed_date)
-        return log
+    # async def remove_completion(self, user_id: uuid.UUID, habit_id: uuid.UUID, completed_date: date | None = None):
+    #     user = await self.session.get(User, user_id)
+    #     if user is None:
+    #         raise ValueError("Пользователь не найден")
+    #     if not user.timezone:
+    #         raise ValueError("Часовой пояс пользователя не указан")
+    #
+    #     try:
+    #         user_timezone = ZoneInfo(user.timezone)
+    #     except ZoneInfoNotFoundError:
+    #         raise ValueError("Некорректный часовой пояс пользователя")
+    #
+    #     date_today = datetime.now(user_timezone).date()
+    #     if completed_date is None:
+    #         completed_date = date_today
+    #
+    #     log = await self.repo.remove_completion(user_id=user_id, habit_id=habit_id, completed_date=completed_date)
+    #     return log
 
 
 class HabitsService:
@@ -100,6 +103,7 @@ class HabitsService:
         self.session = session
         self.habit_repo = HabitsRepository(session=session)
         self.habit_log_repo = HabitLogRepository(session=session)
+        self.friends_repo = FriendsRepository(session=session)
 
     async def create_habit(self, user_id: uuid.UUID, habit_data: HabitCreateSchema):
         user = await self.session.get(User, user_id)
@@ -122,8 +126,46 @@ class HabitsService:
             return None
         return HabitOutputSchema.model_validate(habit)
 
-    async def get_habits(self, user_id: uuid.UUID):
-        habits = await self.habit_repo.get_all_habits(creator_id=user_id)
+    async def get_habits(
+            self,
+            user_id: uuid.UUID,
+            visibility: list[Visibility] | None = None,
+            target_user_id: uuid.UUID | None = None,
+            start_date: date | None = None,
+            end_date: date | None = None,
+            status: str | None = None,
+            limit: int = 50,
+            offset: int = 0,
+    ):
+        if target_user_id is None or target_user_id == user_id:
+            target_user_id = user_id
+        else:
+            relations = await self.friends_repo.get_pair_relations(first_id=user_id, second_id=target_user_id)
+            is_friend = any(relation.status == RelationStatus.ACCEPTED for relation in relations)
+            is_blocked = any(
+                relation.status == RelationStatus.BLOCKED
+                and relation.user_id == target_user_id
+                and relation.target_id == user_id
+                for relation in relations
+            )
+
+            if is_blocked:
+                raise ValueError("Доступ к привычкам пользователя запрещён")
+
+            if is_friend:
+                visibility = [Visibility.FRIENDS, Visibility.PUBLIC]
+            else:
+                visibility = [Visibility.PUBLIC]
+
+        habits = await self.habit_repo.get_all_habits(
+            creator_id=target_user_id,
+            visibility=visibility,
+            start_date=start_date,
+            end_date=end_date,
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
         return [HabitOutputSchema.model_validate(habit) for habit in habits]
 
     async def update_habit(self, user_id: uuid.UUID, habit_id: uuid.UUID, habit_data: HabitUpdateSchema):

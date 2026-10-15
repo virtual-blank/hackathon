@@ -2,7 +2,7 @@ import uuid
 from datetime import date, time
 from typing import Any
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select, update, exists
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -128,32 +128,33 @@ class HabitLogRepository:
         result = await self.session.execute(stmt)
         return list(result.scalars().unique().all())
 
-    async def delete_log(
-        self,
-        *,
-        user_id: uuid.UUID,
-        log_id: uuid.UUID,
-    ) -> bool:
-        stmt = delete(HabitLog).where(
-            HabitLog.id == log_id,
-            HabitLog.user_id == user_id,
-        )
-        result = await self.session.execute(stmt)
-        await self.session.commit()
-        return result.rowcount > 0
+    # async def delete_log(
+    #     self,
+    #     *,
+    #     user_id: uuid.UUID,
+    #     log_id: uuid.UUID,
+    # ) -> bool:
+    #     stmt = delete(HabitLog).where(
+    #         HabitLog.id == log_id,
+    #         HabitLog.user_id == user_id,
+    #     )
+    #     result = await self.session.execute(stmt)
+    #     await self.session.commit()
+    #     return result.rowcount > 0
 
-    async def remove_completion(self, *, user_id: uuid.UUID, habit_id: uuid.UUID, completed_date: date) -> bool:
-        stmt = (
-            delete(HabitLog)
-            .where(
-                HabitLog.user_id == user_id,
-                HabitLog.habit_id == habit_id,
-                HabitLog.completed_date == completed_date,
-            )
-        )
-        result = await self.session.execute(stmt)
-        await self.session.commit()
-        return result.rowcount > 0
+
+    # async def remove_completion(self, *, user_id: uuid.UUID, habit_id: uuid.UUID, completed_date: date) -> bool:
+    #     stmt = (
+    #         delete(HabitLog)
+    #         .where(
+    #             HabitLog.user_id == user_id,
+    #             HabitLog.habit_id == habit_id,
+    #             HabitLog.completed_date == completed_date,
+    #         )
+    #     )
+    #     result = await self.session.execute(stmt)
+    #     await self.session.commit()
+    #     return result.rowcount > 0
 
     async def _user_can_log_habit(
         self,
@@ -204,9 +205,54 @@ class HabitsRepository:
         result = await self.session.execute(habit)
         return result.scalar_one_or_none()
 
-    async def get_all_habits(self, creator_id: uuid.UUID) -> list[Habit]:
-        habits = select(Habit).where(Habit.creator_id == creator_id)
-        result = await self.session.execute(habits)
+    async def get_all_habits(
+            self,
+            creator_id: uuid.UUID,
+            visibility: list[Visibility] | None = None,
+            limit: int = 50,
+            offset: int = 0,
+            start_date: date | None = None,
+            end_date: date | None = None,
+            status: str | None = None,
+    ) -> list[Habit]:
+
+        if start_date is not None and end_date is not None and start_date > end_date:
+            raise ValueError("Начальная дата не может быть позже конечной")
+
+        stmt = select(Habit).where(Habit.creator_id == creator_id)
+
+        if visibility is not None:
+            stmt = stmt.where(Habit.visibility.in_(visibility))
+
+        if end_date is not None:
+            stmt = stmt.where(Habit.start_date <= end_date)
+
+        if status is not None:
+            log_exists = select(HabitLog.id).where(
+                HabitLog.habit_id == Habit.id,
+                HabitLog.user_id == creator_id,
+            )
+
+            if start_date is not None:
+                log_exists = log_exists.where(
+                    HabitLog.completed_date >= start_date
+                )
+
+            if end_date is not None:
+                log_exists = log_exists.where(
+                    HabitLog.completed_date <= end_date
+                )
+
+            condition = ~exists(log_exists) if status == "uncompleted" else exists(log_exists)
+            stmt = stmt.where(condition)
+
+        stmt = (
+            stmt.order_by(Habit.created_at.desc(), Habit.id)
+            .limit(limit)
+            .offset(offset)
+        )
+
+        result = await self.session.execute(stmt)
         return result.scalars().all()
 
     async def update_habit(
