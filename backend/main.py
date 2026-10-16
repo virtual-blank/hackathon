@@ -23,10 +23,22 @@ from src.social.ws import router as social_ws_router
 
 ROUTERS_PREFIX = "/api/v1"
 
+from contextlib import asynccontextmanager
+
+from src.notifications.scheduler import start_scheduler, stop_scheduler
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    start_scheduler()
+    yield
+    stop_scheduler()
+
 app = FastAPI(
     title="Hackathon API",
     version="0.1.0",
     description="API для приложения трекинга привычек",
+    lifespan=lifespan,
 )
 
 # CORS — на хакатоне открываем всё, чтобы фронт с любого порта ходил
