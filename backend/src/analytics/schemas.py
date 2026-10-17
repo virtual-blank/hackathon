@@ -63,3 +63,18 @@ class HeatmapResponseSchema(BaseModel):
     habit_id: uuid.UUID | None
     year: int
     days: list[HeatmapDaySchema]
+
+
+class WeekdayStat(BaseModel):
+    dow: int = Field(..., ge=1, le=7, description="1=Пн ... 7=Вс")
+    completed: int
+    available: int
+    rate: float
+
+
+class HabitPattern(BaseModel):
+    habit_id: uuid.UUID
+    type: str = Field(..., description="daily | custom | sparse | learning")
+    active_days: list[int]
+    label: str
+    weekday_stats: list[WeekdayStat]

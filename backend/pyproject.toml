@@ -19,11 +19,10 @@ uuid6 = ">=2025.0.1"
 aioboto3 = "^15.5.0"
 tzdata = "^2026.5"
 apscheduler = "^3.11.3"
-plotly = "^5.24.0"
+plotly = "^7.1.0"
 
 [tool.poetry.group.dev.dependencies]
 ruff = "==0.15.18"
-
 
 [build-system]
 requires = ["poetry-core"]

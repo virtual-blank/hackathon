@@ -113,3 +113,23 @@ class AnalyticsRepository:
             {"uid": user_id, "hid": habit_id},
         )
         return result.scalar() is not None
+
+    async def get_weekday_completions(
+        self, user_id: uuid.UUID, habit_id: uuid.UUID | None = None
+    ) -> list[dict[str, Any]]:
+        """Сколько раз каждая привычка выполнялась по дням недели."""
+        result = await self.session.execute(
+            text("""
+                SELECT
+                    habit_id,
+                    EXTRACT(ISODOW FROM completed_date)::int AS dow,
+                    COUNT(*) AS completed
+                FROM mv_habit_daily
+                WHERE user_id = :uid
+                  AND (CAST(:hid AS uuid) IS NULL OR habit_id = CAST(:hid AS uuid))
+                GROUP BY habit_id, EXTRACT(ISODOW FROM completed_date)
+                ORDER BY habit_id, dow
+            """),
+            {"uid": user_id, "hid": habit_id},
+        )
+        return [dict(r) for r in result.mappings().all()]
