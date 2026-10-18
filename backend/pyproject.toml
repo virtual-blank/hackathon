@@ -1,3 +1,4 @@
+
 [tool.poetry]
 name = "hackathon"
 version = "0.1.0"
@@ -18,10 +19,14 @@ sqlalchemy = {version = ">=2.1.1", extras = ["asyncio"]}
 uuid6 = ">=2025.0.1"
 aioboto3 = "^15.5.0"
 tzdata = "^2026.5"
+plotly = "^5.24.1"
+
 
 [tool.poetry.group.dev.dependencies]
-ruff = "==0.15.18"
+ruff = "*"
 
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+

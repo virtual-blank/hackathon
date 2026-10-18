@@ -1,9 +1,6 @@
 from src.achievements.models import RuleTypeEnum
 
-# todo: придумать нормальные названия
-# todo: наполнение бд при первом запуске контейнера
-# todo: создание бакета для иконок ачивок
-# todo: добавление ачивок в схему ответа для Users
+
 
 
 achievements_data = [

@@ -32,23 +32,16 @@ class Habit(Uuid7PkMixin, TimeStampMixin, Base):
 
     creator_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     title: Mapped[str] = mapped_column(String(100))
-
     color_hex: Mapped[str] = mapped_column(String(7), default="#4F46E5", server_default="#4F46E5")
-
     current_streak_days: Mapped[int] = mapped_column(Integer, server_default="0", default=0)
     streak_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     max_streak_days: Mapped[int] = mapped_column(Integer, server_default="0", default=0)
-
     visibility: Mapped[Visibility] = mapped_column(
         str_enum(Visibility), default=Visibility.FRIENDS, server_default=Visibility.FRIENDS.value
     )
-
     start_date: Mapped[date] = mapped_column(Date)
-
     notification_times: Mapped[list[time]] = mapped_column(ARRAY(Time), default=list, server_default=text("'{}'"))
-
     last_reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
     creator: Mapped["User"] = relationship(back_populates="habits")
     logs: Mapped[list["HabitLog"]] = relationship(back_populates="habit")
     shared_habit_user: Mapped["SharedHabitUser"] = relationship(back_populates="habit")
@@ -57,6 +50,7 @@ class Habit(Uuid7PkMixin, TimeStampMixin, Base):
     __table_args__ = (CheckConstraint("cardinality(notification_times) <= 3", name="max_3_reminders"),)
 
 
+# пропускам, не успеваем допилить.
 class SharedHabitUser(Uuid7PkMixin, TimeStampMixin, Base):
     """
     Партнёр по совместной привычке. Создатель сюда НЕ пишется, он уже в habits.creator_id.
@@ -85,25 +79,14 @@ class SharedHabitUser(Uuid7PkMixin, TimeStampMixin, Base):
 
 class HabitLog(Uuid7PkMixin, TimeStampMixin, Base):
     __tablename__ = "habit_logs"
-
-    # Пользователь может отмечать привычку только если:
-    # 1. он является создателем привычки;
-    # 2. или он принят как партнёр в shared_habit_users.
-    # Это бизнес-правило проверяется в service layer.
-
     habit_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("habits.id", ondelete="CASCADE"))
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
-
-    # Календарный день в часовом поясе пользователя. БЕЗ default=date.today:
-    # это дата сервера, а не пользователя. Дату считает сервис.
     completed_date: Mapped[date] = mapped_column(Date)
 
     habit: Mapped["Habit"] = relationship(back_populates="logs")
     user: Mapped["User"] = relationship(back_populates="habit_logs")
 
     __table_args__ = (
-        # Одна отметка в день на человека. Покрывает и запросы «все отметки привычки».
         UniqueConstraint("habit_id", "user_id", "completed_date"),
-        # История пользователя по всем привычкам за диапазон дат.
         Index("ix_habit_logs_user_date", "user_id", "completed_date"),
     )

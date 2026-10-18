@@ -1,6 +1,7 @@
 import enum
 from sqlalchemy import Enum
 
+
 def str_enum(enum_cls: type[enum.Enum], length: int = 16) -> Enum:
     """
     Enum без нативного типа Postgres: VARCHAR + CHECK.

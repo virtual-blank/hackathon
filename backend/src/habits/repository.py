@@ -159,7 +159,7 @@ class HabitLogRepository:
         user_id: uuid.UUID,
         habit: Habit,
     ) -> bool:
-        """Проверить, что юзер — создатель привычки или принятый партнёр."""
+        """Проверить, что юзер создатель привычки или принятый партнёр."""
         if habit.creator_id == user_id:
             return True
 
