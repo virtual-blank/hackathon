@@ -15,7 +15,7 @@ engine = create_async_engine(
     pool_pre_ping=True,
 )
 
-# Имена ограничений нужны Alembic: без них нельзя надёжно удалять и менять constraints.
+# нейминги для alembic
 NAMING_CONVENTION = {
     "ix": "ix_%(column_0_label)s",
     "uq": "uq_%(table_name)s_%(column_0_N_name)s",

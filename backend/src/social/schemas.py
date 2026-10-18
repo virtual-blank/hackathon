@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class MessageCreateSchema(BaseModel):
     """Отправка сообщения через HTTP (альтернатива WebSocket, удобно для тестов через Swagger)."""
+
     model_config = ConfigDict(str_strip_whitespace=True)
 
     receiver_id: uuid.UUID
@@ -20,6 +21,7 @@ class MessageCreateSchema(BaseModel):
 
 class MessageOutputSchema(BaseModel):
     """Сообщение в ответе API."""
+
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
@@ -38,6 +40,7 @@ class MessageOutputSchema(BaseModel):
 
 class WSMessageIn(BaseModel):
     """Клиент → сервер: отправить сообщение получателю."""
+
     model_config = ConfigDict(str_strip_whitespace=True)
 
     type: Literal["message"]
@@ -47,6 +50,7 @@ class WSMessageIn(BaseModel):
 
 class WSHistoryIn(BaseModel):
     """Клиент → сервер: запросить историю переписки с пользователем."""
+
     model_config = ConfigDict(str_strip_whitespace=True)
 
     type: Literal["history"]
@@ -59,6 +63,7 @@ class WSHistoryIn(BaseModel):
 
 class WSMarkReadIn(BaseModel):
     """Клиент → сервер: пометить сообщения прочитанными."""
+
     model_config = ConfigDict(str_strip_whitespace=True)
 
     type: Literal["mark_read"]
@@ -72,6 +77,7 @@ class WSMarkReadIn(BaseModel):
 
 class WSNewMessageOut(BaseModel):
     """Сервер → клиент: пришло новое сообщение."""
+
     type: Literal["new_message"] = "new_message"
 
     message: MessageOutputSchema
@@ -79,6 +85,7 @@ class WSNewMessageOut(BaseModel):
 
 class WSHistoryOut(BaseModel):
     """Сервер → клиент: история сообщений с собеседником."""
+
     type: Literal["history"] = "history"
 
     peer_id: uuid.UUID
@@ -87,6 +94,7 @@ class WSHistoryOut(BaseModel):
 
 class WSReadOut(BaseModel):
     """Сервер → клиент: собеседник прочитал твои сообщения."""
+
     type: Literal["read"] = "read"
 
     by: uuid.UUID  # id того, кто прочитал
@@ -95,8 +103,7 @@ class WSReadOut(BaseModel):
 
 class WSErrorOut(BaseModel):
     """Сервер → клиент: ошибка обработки события."""
+
     type: Literal["error"] = "error"
 
     detail: str
-
-

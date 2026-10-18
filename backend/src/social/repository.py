@@ -103,10 +103,13 @@ class MessagesRepository:
         Проверить, есть ли блокировка в любую сторону между двумя пользователями.
         Если A заблокировал B или B заблокировал A — сообщение запрещено.
         """
-        stmt = select(UserRelation).where(
-            UserRelation.status == RelationStatus.BLOCKED,
-            ((UserRelation.user_id == user_a) & (UserRelation.target_id == user_b))
-            | ((UserRelation.user_id == user_b) & (UserRelation.target_id == user_a)),
+        stmt = (
+            select(UserRelation)
+            .where(
+                UserRelation.status == RelationStatus.BLOCKED,
+                ((UserRelation.user_id == user_a) & (UserRelation.target_id == user_b))
+                | ((UserRelation.user_id == user_b) & (UserRelation.target_id == user_a)),
+            )
+            .limit(1)
         )
-        result = await self.session.execute(stmt)
-        return result.scalar_one_or_none() is not None
+        return (await self.session.execute(stmt)).first() is not None

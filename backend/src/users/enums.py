@@ -7,7 +7,6 @@ class Theme(enum.StrEnum):
     SYSTEM = "system"
 
 
-
 class TimezoneEnum(enum.StrEnum):
     # Универсальное время
     UTC = "UTC"
@@ -25,7 +24,7 @@ class TimezoneEnum(enum.StrEnum):
     ASIA_VLADIVOSTOK = "Asia/Vladivostok"
     ASIA_MAGADAN = "Asia/Magadan"
     ASIA_KAMCHATKA = "Asia/Kamchatka"
-    
+
     # Европа
     EUROPE_LONDON = "Europe/London"
     EUROPE_PARIS = "Europe/Paris"

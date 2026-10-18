@@ -1,6 +1,7 @@
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query, status
+
 from src.auth.deps import CurrentUserIdDep, SessionDep
 from src.feed.schemas import FeedOutputSchema, ReviewCreateSchema, ReviewOutputSchema, ReviewUpdateSchema
 from src.feed.service import FeedService
@@ -9,12 +10,12 @@ router = APIRouter(prefix="/feed", tags=["👁‍🗨 Feed"])
 
 
 # == GET FEED ==
-@router.get("/", response_model=list[FeedOutputSchema], status_code=status.HTTP_200_OK, description="Get feed")
+@router.get("", response_model=list[FeedOutputSchema], status_code=status.HTTP_200_OK, description="Get feed")
 async def get_feed(
     current_user_id: CurrentUserIdDep,
     session: SessionDep,
-    limit: int = Query(default=50, description="Количество постов на странице"),
-    offset: int = Query(default=0),
+    limit: int = Query(default=50, ge=1, le=100, description="Количество постов на странице"),
+    offset: int = Query(default=0, ge=0),
 ):
     service = FeedService(session=session)
     try:
@@ -25,7 +26,7 @@ async def get_feed(
 
 # == CREATE REVIEW ==
 @router.post(
-    "/reviews", response_model=ReviewOutputSchema, status_code=status.HTTP_200_OK, description="Create new review"
+    "/reviews", response_model=ReviewOutputSchema, status_code=status.HTTP_201_CREATED, description="Create new review"
 )
 async def create_review(current_user_id: CurrentUserIdDep, session: SessionDep, review_dto: ReviewCreateSchema):
     service = FeedService(session=session)
@@ -38,7 +39,12 @@ async def create_review(current_user_id: CurrentUserIdDep, session: SessionDep, 
 
 
 # == EDIT REVIEW ==
-@router.patch("/reviews/{review_id}", status_code=status.HTTP_200_OK, description="Edit review")
+@router.patch(
+    "/reviews/{review_id}",
+    response_model=ReviewOutputSchema,
+    status_code=status.HTTP_200_OK,
+    description="Edit review",
+)
 async def edit_review(
     current_user_id: CurrentUserIdDep, review_id: uuid.UUID, session: SessionDep, review_update_dto: ReviewUpdateSchema
 ):
@@ -54,11 +60,11 @@ async def edit_review(
 
 
 # == DELETE REVIEW ==
-@router.delete("/reviews/{review_id}", status_code=status.HTTP_202_ACCEPTED, description="Delete review")
-async def delete_review(current_user_id: CurrentUserIdDep, session: SessionDep, review_id: uuid.UUID):
+@router.delete("/reviews/{review_id}", status_code=status.HTTP_204_NO_CONTENT, description="Delete review")
+async def delete_review(current_user_id: CurrentUserIdDep, session: SessionDep, review_id: uuid.UUID) -> None:
     service = FeedService(session=session)
     try:
-        return await service.delete_review(review_id=review_id, user_id=current_user_id)
+        await service.delete_review(review_id=review_id, user_id=current_user_id)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except Exception:

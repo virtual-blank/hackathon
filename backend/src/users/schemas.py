@@ -79,6 +79,18 @@ class UserOutputSchema(BaseModel):
         ]
 
 
+class UserSearchSchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    username: str
+    pfp_url: str
+
+    @field_validator("pfp_url", mode="before")
+    @classmethod
+    def set_default_pfp(cls, v: str | None) -> str:
+        return v or DEFAULT_PFP_URL
+
+
 class TokenSchema(BaseModel):
     access_token: str
     token_type: str = "Bearer"

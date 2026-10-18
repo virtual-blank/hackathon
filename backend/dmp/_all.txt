@@ -1,0 +1,4248 @@
+# Project: backend
+
+## Structure
+
+backend/
+  alembic/
+    env.py
+    versions/
+      # пока что убрал
+  core/
+    config.py
+  database/
+    db.py
+    enum.py
+    mixins.py
+  main.py
+  src/
+    achievements/
+      models.py
+      repository.py
+      schemas.py
+      seed_achievements_db.py
+      service.py
+    analytics/
+      models.py
+      repository.py
+      router.py
+      schemas.py
+      service.py
+    auth/
+      deps.py
+      hash_argon.py
+      security.py
+    exceptions/
+      auth_exceptions.py
+      friends_exceptions.py
+      user_exceptions.py
+    feed/
+      models.py
+      repository.py
+      router.py
+      schemas.py
+      service.py
+    friends/
+      models.py
+      repository.py
+      router.py
+      schemas.py
+      service.py
+    habits/
+      enums.py
+      models.py
+      repository.py
+      router.py
+      schemas.py
+      service.py
+    social/
+      enums.py
+      models.py
+      repository.py
+      router.py
+      schemas.py
+      service.py
+      ws.py
+    synthetic/
+      fill_db.py
+    telegram/
+      client.py
+      handlers.py
+      reminders.py
+      router.py
+      schemas.py
+      service.py
+    users/
+      enums.py
+      models.py
+      pfp/
+        minio.py
+        router.py
+        schemas.py
+      repository.py
+      router.py
+      schemas.py
+      service.py
+
+=== main.py ===
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
+import asyncio
+import contextlib
+from contextlib import asynccontextmanager
+
+from core.config import get_telegram_settings
+from src.telegram import client as tg_client
+from src.telegram.reminders import reminders_loop
+
+# == MODELS ==
+from src.users.models import User, UserAchievement
+from src.habits.models import Habit, HabitLog, SharedHabitUser
+from src.social.models import UserRelation, Message
+from src.feed.models import Review
+from src.achievements.models import Achievement
+# == MODELS ==
+
+# == ROUTERS ==
+from src.users.router import router as users_router
+from src.feed.router import router as feed_router
+from src.users.pfp.router import router as users_pfp_router
+from src.habits.router import router as habits_router
+from src.social.router import router as social_router
+from src.friends.router import router as friends_router
+from src.telegram.router import router as telegram_router
+from src.social.ws import router as social_ws_router
+# == ROUTERS ==
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings = get_telegram_settings()
+    if settings.webhook_url:
+        await tg_client.set_webhook(settings.webhook_url)
+
+    reminders_task = asyncio.create_task(reminders_loop())
+    try:
+        yield
+    finally:
+        reminders_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await reminders_task
+
+ROUTERS_PREFIX = "/api/v1"
+
+app = FastAPI(
+    title="Hackathon API",
+    version="1.1.0",
+    description="API для приложения трекинга привычек",
+    lifespan=lifespan,
+)
+
+# CORS — на хакатоне открываем всё, чтобы фронт с любого порта ходил
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(users_router, prefix=ROUTERS_PREFIX)
+app.include_router(feed_router, prefix=ROUTERS_PREFIX)
+app.include_router(users_pfp_router, prefix=ROUTERS_PREFIX)
+app.include_router(habits_router, prefix=ROUTERS_PREFIX)
+app.include_router(social_router, prefix=ROUTERS_PREFIX)
+app.include_router(friends_router, prefix=ROUTERS_PREFIX)
+app.include_router(telegram_router, prefix=ROUTERS_PREFIX)
+app.include_router(social_ws_router)
+
+
+@app.get("/health", tags=["🩺 System"], description="Healthcheck")
+async def health() -> dict[str, str]:
+    """Проверка что сервер запустился йоу"""
+    return {"status": "ok"}
+
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="127.0.0.1", port=8080, reload=True)
+
+=== src/achievements/models.py ===
+import enum
+from typing import TYPE_CHECKING
+
+from sqlalchemy import Integer, String
+from sqlalchemy.orm import Mapped, mapped_column
+
+from database.db import Base
+from database.mixins import TimeStampMixin, Uuid7PkMixin
+
+if TYPE_CHECKING:
+    pass
+
+
+class RuleTypeEnum(str, enum.Enum):
+    STREAK = "STREAK"
+    FRIENDS_COUNT = "FRIENDS_COUNT"
+    TOTAL_HABITS = "TOTAL_HABITS"
+
+
+class Achievement(Uuid7PkMixin, TimeStampMixin, Base):
+    __tablename__ = "achievements"
+
+    name: Mapped[str] = mapped_column(String(25), unique=True)  # название
+    rule_type: Mapped[str] = mapped_column(String(32), default="STREAK", server_default="STREAK")  # тип условия ачивки
+    rule_value: Mapped[int] = mapped_column(Integer, default=0, server_default="0")  # количество для выполнения
+    color_hex: Mapped[str] = mapped_column(String(7))  # backround glow color
+    requirement: Mapped[str] = mapped_column(String(255))  # описание условий выполнения (строгим текстом)
+    description: Mapped[str] = mapped_column(String(255))  # описание (для пользователя)
+    icon_url: Mapped[str]  # иконка
+
+=== src/achievements/repository.py ===
+import uuid
+
+from sqlalchemy import and_, func, or_, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.achievements.models import Achievement, RuleTypeEnum
+from src.habits.models import Habit
+from src.social.enums import RelationStatus
+from src.social.models import UserRelation
+from src.users.models import UserAchievement
+
+
+class AchievementsRepository:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def _commit(self):
+        await self.session.commit()
+
+    async def get_allowed_achievements(self, rule_value: int, rule_type: RuleTypeEnum):
+        stmt = select(Achievement.id).where(Achievement.rule_type == rule_type, Achievement.rule_value == rule_value)
+        result = await self.session.execute(stmt)
+        return result.scalars().all()
+
+    async def set_achievement(self, user_id: uuid.UUID, achievement_id: uuid.UUID) -> UserAchievement | None:
+        new_achievement = UserAchievement(user_id=user_id, achievement_id=achievement_id)
+        self.session.add(new_achievement)
+        try:
+            await self._commit()
+            return new_achievement
+        except IntegrityError:
+            await self.session.rollback()
+            return None
+
+    async def get_friends_count(self, user_id: uuid.UUID):
+        stmt = select(func.count(UserRelation.id)).where(
+            or_(
+                and_(UserRelation.user_id == user_id, UserRelation.status == RelationStatus.ACCEPTED),
+                and_(UserRelation.target_id == user_id, UserRelation.status == RelationStatus.ACCEPTED),
+            )
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_habits_count(self, user_id: uuid.UUID):
+        stmt = select(func.count(Habit.id)).where(Habit.creator_id == user_id) 
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+=== src/achievements/schemas.py ===
+from pydantic import BaseModel, ConfigDict, field_validator
+
+from src.achievements.models import RuleTypeEnum
+from src.users.pfp.minio import ACHIEVEMENTS_PREFIX
+
+
+class AchievementOutputSchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    name: str
+    rule_type: RuleTypeEnum
+    rule_value: int
+    color_hex: str
+    requirement: str
+    description: str
+    icon_url: str
+
+    @field_validator("icon_url", mode="after")
+    @classmethod
+    def build_url(cls, v: str) -> str:
+        return v if v.startswith("http") else f"{ACHIEVEMENTS_PREFIX}{v}"
+
+
+=== src/achievements/service.py ===
+import uuid
+
+from sqlalchemy.ext.asyncio import AsyncSession
+from database.db import async_session_factory
+
+from src.achievements.models import RuleTypeEnum
+from src.achievements.repository import AchievementsRepository
+
+
+class AchievementsService:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+        self.repo = AchievementsRepository(session=session)
+
+    # вешаем при отметке привычки
+    async def check_streak_achievements(self, user_id: uuid.UUID, streak_days: int):
+        allowed_achievements_ids = await self.repo.get_allowed_achievements(
+            rule_value=streak_days,
+            rule_type=RuleTypeEnum.STREAK,
+        )
+        if not allowed_achievements_ids:
+            return None
+
+        for achievement_id in allowed_achievements_ids:
+            new_achievement = await self.repo.set_achievement(user_id=user_id, achievement_id=achievement_id)
+            if new_achievement:
+                # логировать
+                print(f"выдана новая ачивка {achievement_id} для user_id: {user_id}")
+
+    # вешаем при отправке/принятии дружбы
+    async def check_total_friends_achievements(self, user_id: uuid.UUID):
+        total_friends = await self.repo.get_friends_count(user_id=user_id)
+        if not total_friends:
+            return None
+
+        allowed_achievements_ids = await self.repo.get_allowed_achievements(
+            rule_value=total_friends, rule_type=RuleTypeEnum.FRIENDS_COUNT
+        )
+
+        if not allowed_achievements_ids:
+            return None
+
+        for achievement_id in allowed_achievements_ids:
+            new_achievement = await self.repo.set_achievement(user_id=user_id, achievement_id=achievement_id)
+            if new_achievement:
+                print(f"выдана новая ачивка {achievement_id} для user_id: {user_id}")
+
+    # вешаем при создании привычки
+    async def check_total_habits_count_achievements(self, user_id: uuid.UUID):
+        total_habits = await self.repo.get_habits_count(user_id=user_id)
+        if not total_habits:
+            return None
+
+        allowed_achievements_ids = await self.repo.get_allowed_achievements(
+            rule_value=total_habits, rule_type=RuleTypeEnum.TOTAL_HABITS
+        )
+
+        if not allowed_achievements_ids:
+            return None
+
+        for achievement_id in allowed_achievements_ids:
+            new_achievement = await self.repo.set_achievement(user_id=user_id, achievement_id=achievement_id)
+            if new_achievement:
+                print(f"выдана новая ачивка {achievement_id} для user_id: {user_id}")
+    
+    @staticmethod
+    async def process_achievements_task_bt(
+        user_id: uuid.UUID,
+        streak_days: int,
+    ):
+        async with async_session_factory() as session:
+            try:
+                ach_srvice = AchievementsService(session=session)
+                result = await ach_srvice.check_streak_achievements(
+                    user_id=user_id,
+                    streak_days=streak_days
+                )
+                await session.commit()
+                return result
+            except Exception:
+                await session.rollback()
+                raise
+    
+    @staticmethod
+    async def process_achievements_habits_bt(
+        user_id: uuid.UUID
+    ):
+        async with async_session_factory() as session:
+            try:
+                ach_service = AchievementsService(session=session)
+                return await ach_service.check_total_habits_count_achievements(user_id=user_id)
+            except Exception:
+                await session.rollback()
+                raise    
+    
+    @staticmethod
+    async def process_achievements_friends_bt(
+        user_id: uuid.UUID
+    ):
+        async with async_session_factory() as session:
+            try:
+                ach_service = AchievementsService(session=session)
+                return await ach_service.check_total_friends_achievements(user_id=user_id)
+            except Exception:
+                await session.rollback()
+                raise                  
+
+
+
+=== src/analytics/models.py ===
+
+=== src/analytics/repository.py ===
+
+=== src/analytics/router.py ===
+
+=== src/analytics/schemas.py ===
+
+=== src/analytics/service.py ===
+
+=== src/auth/deps.py ===
+import uuid
+from typing import Annotated
+
+from database.db import get_db
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy.ext.asyncio import AsyncSession
+from src.auth.security import decode_access_token
+from src.exceptions.auth_exceptions import InvalidTokenError
+from src.users.models import User
+
+SessionDep = Annotated[AsyncSession, Depends(get_db)]
+
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
+async def get_current_user_id(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+) -> uuid.UUID:
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Не авторизован",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    try:
+        return decode_access_token(credentials.credentials)
+    except InvalidTokenError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(exc),
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
+
+
+async def get_current_user(
+    session: SessionDep,
+    user_id: Annotated[uuid.UUID, Depends(get_current_user_id)],
+) -> User:
+    user = await session.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Пользователь не найден")
+    return user
+
+
+CurrentUserIdDep = Annotated[uuid.UUID, Depends(get_current_user_id)]
+CurrentUserDep = Annotated[User, Depends(get_current_user)]
+
+=== src/auth/hash_argon.py ===
+import asyncio
+
+from argon2 import PasswordHasher
+
+ph = PasswordHasher()
+
+
+DUMMY_HASH = ph.hash("DUMMY")
+
+
+async def create_password(password: str) -> str:
+    return await asyncio.to_thread(ph.hash, password)
+
+
+async def verify_password(password: str, hashed_password: str) -> bool:
+    try:
+        return await asyncio.to_thread(ph.verify, hash=hashed_password, password=password)
+    except Exception:  # todo: ловить ошибки asyncio и argon раздельно
+        return False
+
+=== src/auth/security.py ===
+import hashlib
+import secrets
+import uuid
+from datetime import datetime, timedelta, timezone
+
+import jwt
+from core.config import get_jwt_settings
+from src.exceptions.auth_exceptions import InvalidTokenError
+
+ACCESS_TOKEN_EXPIRE_MINUTES = get_jwt_settings().access_token_expire_minutes
+SECRET_KEY = get_jwt_settings().secret_key
+ALGORITHM = get_jwt_settings().algorithm
+REFRESH_TOKEN_EXPIRE_DAYS = get_jwt_settings().refresh_token_expire_days
+
+def create_access_token(user_id: uuid.UUID, expires_delta: timedelta | None = None) -> str:
+    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    payload = {"sub": str(user_id), "exp": expire}
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def decode_access_token(token: str) -> uuid.UUID:
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except jwt.ExpiredSignatureError as exc:
+        raise InvalidTokenError("Токен истёк") from exc
+    except jwt.InvalidTokenError as exc:
+        raise InvalidTokenError("Невалидный токен") from exc
+
+    sub = payload.get("sub")
+    if sub is None:
+        raise InvalidTokenError("Токен без sub")
+    try:
+        return uuid.UUID(sub)
+    except ValueError as exc:
+        raise InvalidTokenError("Некорректный sub в токене") from exc
+
+def create_refresh_token() -> str:
+    return secrets.token_urlsafe(64)
+
+
+def hash_refresh_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+=== src/exceptions/auth_exceptions.py ===
+class InvalidTokenError(Exception):
+    """
+    Token invalid
+    """
+
+=== src/exceptions/friends_exceptions.py ===
+class FriendsNotFoundError(Exception):
+    """Нет пользователя, заявки или дружбы, с которыми просят что-то сделать."""
+
+
+class FriendsConflictError(Exception):
+    """Действие невозможно при текущей связи между пользователями."""
+
+=== src/exceptions/user_exceptions.py ===
+class UsernameTakenError(Exception):
+    """Юзернейм или почта заняты"""
+
+class IncorrectPassword(Exception):
+    """Не верный пароль"""
+
+class AuthError(Exception):
+    """Ошибки авторизации"""
+    
+class UserNotFoundError(Exception):
+    """Пользователь не найден"""
+
+class DataFormatError(Exception):
+    """Ошибка входящих данных"""
+
+=== src/feed/models.py ===
+import uuid
+from typing import TYPE_CHECKING
+
+from database.db import Base
+from database.mixins import TimeStampMixin, Uuid7PkMixin
+from sqlalchemy import CheckConstraint, ForeignKey, Text, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+if TYPE_CHECKING:
+    from src.habits.models import Habit
+    from src.users.models import User
+
+
+class Review(Uuid7PkMixin, TimeStampMixin, Base):
+    __tablename__ = "reviews"
+    reviewer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    habit_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("habits.id", ondelete="CASCADE"))
+    comment: Mapped[str | None] = mapped_column(Text)
+    rate: Mapped[int]  # 1: пуш, 0: шейм
+
+    habit: Mapped["Habit"] = relationship(back_populates="reviews")
+
+    reviewer: Mapped["User"] = relationship()
+
+    __table_args__ = (
+        UniqueConstraint("reviewer_id", "habit_id", name="uq_reviewer_id_habit_log"),
+        CheckConstraint("rate IN (0,1)", name="ck_rate"),
+    )
+
+=== src/feed/repository.py ===
+import uuid
+from datetime import date, timedelta
+
+from sqlalchemy import and_, case, delete, exists, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload, selectinload
+
+from src.feed.models import Review
+from src.habits.enums import Visibility
+from src.habits.models import Habit, HabitLog
+from src.social.enums import RelationStatus
+from src.social.models import UserRelation
+
+
+class FeedRepository:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def _commit(self):
+        await self.session.commit()
+
+    async def _rollback(self):
+        await self.session.rollback()
+
+    async def get_friends_feed(self, user_id: uuid.UUID, limit: int, offset: int):
+        # id всех друзей
+        friends_stmt = select(
+            case((UserRelation.user_id == user_id, UserRelation.target_id), else_=UserRelation.user_id)
+        ).where(
+            UserRelation.status == RelationStatus.ACCEPTED,
+            or_(UserRelation.user_id == user_id, UserRelation.target_id == user_id),
+        )
+
+        # последняя активность, общее количество логов
+        latest_activity_stmt = (
+            select(
+                HabitLog.habit_id,
+                func.max(HabitLog.completed_date).label("last_log_date"),
+                func.count(HabitLog.id).label("total_logs_count"),
+            ).group_by(HabitLog.habit_id)
+        ).subquery()
+
+        ninety_days_ago = date.today() - timedelta(days=90)
+
+        # мейн запрос 
+        stmt = (
+            select(
+                Habit,
+                func.coalesce(latest_activity_stmt.c.total_logs_count, 0).label("total_logs_count"),
+            )
+            .outerjoin(latest_activity_stmt, Habit.id == latest_activity_stmt.c.habit_id)
+            .where(Habit.creator_id.in_(friends_stmt), Habit.visibility != Visibility.PRIVATE)
+            .order_by(
+                func.coalesce(latest_activity_stmt.c.last_log_date, Habit.start_date).desc(),
+                Habit.created_at.desc(),
+            )
+            .limit(limit)
+            .offset(offset)
+            .options(
+                joinedload(Habit.creator),
+                selectinload(Habit.logs.and_(HabitLog.completed_date >= ninety_days_ago)),
+                selectinload(Habit.reviews).joinedload(Review.reviewer),
+            )
+        )
+
+        result = await self.session.execute(stmt)
+        return [(row[0], row[1]) for row in result.unique().all()]
+
+    async def can_user_review_habit(self, user_id: uuid.UUID, habit_id: uuid.UUID) -> None:
+        habit = await self.session.get(Habit, habit_id)
+        if habit is None or habit.visibility == Visibility.PRIVATE:
+            raise ValueError("Привычка не найдена или скрыта")
+
+        if habit.creator_id == user_id:
+            raise ValueError("Нельзя оценивать собственную привычку")
+
+        friend_exists_stmt = select(
+            exists().where(
+                UserRelation.status == RelationStatus.ACCEPTED,
+                or_(
+                    and_(UserRelation.user_id == user_id, UserRelation.target_id == habit.creator_id),
+                    and_(UserRelation.user_id == habit.creator_id, UserRelation.target_id == user_id),
+                ),
+            )
+        )
+        is_friend = (await self.session.execute(friend_exists_stmt)).scalar()
+        if not is_friend:
+            raise ValueError("Оценивать можно только привычки друзей")
+
+    async def create_review_and_get_reviewer(
+        self, reviewer_id: uuid.UUID, habit_id: uuid.UUID, comment: str | None, rate: int
+    ) -> Review:
+        new_review = Review(reviewer_id=reviewer_id, habit_id=habit_id, comment=comment, rate=rate)
+        self.session.add(new_review)
+        try:
+            await self._commit()
+        except IntegrityError as exc:
+            await self._rollback()
+            raise ValueError("Вы уже оставляли реакцию на эту привычку") from exc
+
+        stmt = select(Review).where(Review.id == new_review.id).options(joinedload(Review.reviewer))
+        result = await self.session.execute(stmt)
+        return result.scalar_one()
+
+    async def edit_review(
+        self, review_id: uuid.UUID, reviewer_id: uuid.UUID, new_review_dict: dict
+    ) -> Review | None:
+        stmt = (
+            update(Review)
+            .where(Review.id == review_id, Review.reviewer_id == reviewer_id)
+            .values(**new_review_dict)
+            .returning(Review.id)
+        )
+        result = await self.session.execute(stmt)
+        updated_review_id = result.scalar_one_or_none()
+        if not updated_review_id:
+            await self._rollback()
+            return None
+
+        await self._commit()
+        select_stmt = select(Review).where(Review.id == updated_review_id).options(joinedload(Review.reviewer))
+        return (await self.session.execute(select_stmt)).scalar_one()
+
+    async def delete_review(self, reviewer_id: uuid.UUID, review_id: uuid.UUID) -> bool:
+        stmt = delete(Review).where(Review.id == review_id, Review.reviewer_id == reviewer_id).returning(Review.id)
+        result = await self.session.execute(stmt)
+        deleted_id = result.scalar_one_or_none()
+        if not deleted_id:
+            await self._rollback()
+            return False
+        await self._commit()
+        return True
+
+=== src/feed/router.py ===
+import uuid
+
+from fastapi import APIRouter, HTTPException, Query, status
+
+from src.auth.deps import CurrentUserIdDep, SessionDep
+from src.feed.schemas import FeedOutputSchema, ReviewCreateSchema, ReviewOutputSchema, ReviewUpdateSchema
+from src.feed.service import FeedService
+
+router = APIRouter(prefix="/feed", tags=["👁‍🗨 Feed"])
+
+
+# == GET FEED ==
+@router.get("", response_model=list[FeedOutputSchema], status_code=status.HTTP_200_OK, description="Get feed")
+async def get_feed(
+    current_user_id: CurrentUserIdDep,
+    session: SessionDep,
+    limit: int = Query(default=50, ge=1, le=100, description="Количество постов на странице"),
+    offset: int = Query(default=0, ge=0),
+):
+    service = FeedService(session=session)
+    try:
+        return await service.get_feed(user_id=current_user_id, limit=limit, offset=offset)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
+
+
+# == CREATE REVIEW ==
+@router.post(
+    "/reviews", response_model=ReviewOutputSchema, status_code=status.HTTP_201_CREATED, description="Create new review"
+)
+async def create_review(current_user_id: CurrentUserIdDep, session: SessionDep, review_dto: ReviewCreateSchema):
+    service = FeedService(session=session)
+    try:
+        return await service.create_review(user_id=current_user_id, review_dto=review_dto)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
+
+
+# == EDIT REVIEW ==
+@router.patch(
+    "/reviews/{review_id}",
+    response_model=ReviewOutputSchema,
+    status_code=status.HTTP_200_OK,
+    description="Edit review",
+)
+async def edit_review(
+    current_user_id: CurrentUserIdDep, review_id: uuid.UUID, session: SessionDep, review_update_dto: ReviewUpdateSchema
+):
+    service = FeedService(session=session)
+    try:
+        return await service.edit_review(
+            user_id=current_user_id, review_id=review_id, review_update_dto=review_update_dto
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
+
+
+# == DELETE REVIEW ==
+@router.delete("/reviews/{review_id}", status_code=status.HTTP_204_NO_CONTENT, description="Delete review")
+async def delete_review(current_user_id: CurrentUserIdDep, session: SessionDep, review_id: uuid.UUID) -> None:
+    service = FeedService(session=session)
+    try:
+        await service.delete_review(review_id=review_id, user_id=current_user_id)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
+
+=== src/feed/schemas.py ===
+import uuid
+from datetime import date, datetime
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from src.habits.schemas import HabitOutputSchema
+from src.users.pfp.minio import DEFAULT_PFP_URL
+
+
+class ReviewCreateSchema(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    habit_id: uuid.UUID
+    comment: str | None = None
+    rate: Annotated[int, Field(ge=0, le=1)]
+
+
+class ReviewUpdateSchema(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    habit_id: uuid.UUID | None = None
+    comment: str | None = None
+    rate: Annotated[int, Field(ge=0, le=1)] | None = None
+
+
+# == Feed Schemas ==
+class Reviewer(BaseModel):
+    # берется из User
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    username: str
+    pfp_url: str
+
+    @field_validator("pfp_url", mode="before")
+    @classmethod
+    def set_default_pfp(cls, v: str | None) -> str:
+        return v or DEFAULT_PFP_URL
+
+
+class ReviewOutputSchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    updated_at: datetime
+    habit_id: uuid.UUID
+    reviewer: Reviewer
+    rate: Annotated[int, Field(ge=0, le=1)]
+    comment: str | None = None
+
+
+class HabitFeedLogOutputSchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    completed_date: date
+
+
+class FeedOutputSchema(BaseModel):
+    creator: Reviewer
+    habit: HabitOutputSchema
+    total_logs_count: int
+    habit_logs: list[HabitFeedLogOutputSchema]
+    reviews: list[ReviewOutputSchema] = []
+
+=== src/feed/service.py ===
+import uuid
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.feed.repository import FeedRepository
+from src.feed.schemas import (
+    FeedOutputSchema,
+    HabitFeedLogOutputSchema,
+    ReviewCreateSchema,
+    Reviewer,
+    ReviewOutputSchema,
+    ReviewUpdateSchema,
+)
+from src.habits.schemas import HabitOutputSchema
+
+
+class FeedService:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+        self.repo = FeedRepository(session=session)
+
+    async def get_feed(self, user_id: uuid.UUID, limit: int, offset: int) -> list[FeedOutputSchema]:
+        feed_dao = await self.repo.get_friends_feed(user_id=user_id, offset=offset, limit=limit)
+
+        result_feed = []
+        for habit, total_logs_count in feed_dao:
+            result_feed.append(
+                FeedOutputSchema(
+                    creator=Reviewer.model_validate(habit.creator),
+                    habit=HabitOutputSchema.from_habit(habit),
+                    habit_logs=[HabitFeedLogOutputSchema.model_validate(log) for log in habit.logs],
+                    reviews=[ReviewOutputSchema.model_validate(review) for review in habit.reviews],
+                    total_logs_count=total_logs_count,
+                )
+            )
+        return result_feed
+
+    async def create_review(self, user_id: uuid.UUID, review_dto: ReviewCreateSchema) -> ReviewOutputSchema:
+        await self.repo.can_user_review_habit(user_id=user_id, habit_id=review_dto.habit_id)
+
+        new_review_dao = await self.repo.create_review_and_get_reviewer(
+            reviewer_id=user_id,
+            habit_id=review_dto.habit_id,
+            comment=review_dto.comment,
+            rate=review_dto.rate,
+        )
+        return ReviewOutputSchema.model_validate(new_review_dao)
+
+    async def edit_review(
+        self, user_id: uuid.UUID, review_id: uuid.UUID, review_update_dto: ReviewUpdateSchema
+    ) -> ReviewOutputSchema:
+        new_review_dict = review_update_dto.model_dump(exclude_unset=True)
+        new_review_dict.pop("habit_id", None)
+
+        if "rate" in new_review_dict and new_review_dict["rate"] is None:
+            raise ValueError("Оценка не может быть пустой")
+
+        if not new_review_dict:
+            raise ValueError("Не указаны поля для обновления")
+
+        edited_review_dao = await self.repo.edit_review(
+            review_id=review_id,
+            reviewer_id=user_id,
+            new_review_dict=new_review_dict,
+        )
+        if not edited_review_dao:
+            raise ValueError("Оценка не найдена или нет прав на её изменение")
+
+        return ReviewOutputSchema.model_validate(edited_review_dao)
+
+    async def delete_review(self, review_id: uuid.UUID, user_id: uuid.UUID) -> bool:
+        is_deleted = await self.repo.delete_review(reviewer_id=user_id, review_id=review_id)
+        if not is_deleted:
+            raise ValueError("Оценка не найдена или нет прав на её удаление")
+        return True
+
+=== src/friends/models.py ===
+# Модель пока живёт в social: переедет сюда, когда будет готов домен чатов.
+from src.social.models import UserRelation
+
+__all__ = ["UserRelation"]
+
+=== src/friends/repository.py ===
+import uuid
+
+from sqlalchemy import and_, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.friends.models import UserRelation
+from src.social.enums import RelationStatus
+from src.users.models import User
+
+
+class FriendsRepository:
+    """Не коммитит сам: транзакцию закрывает сервис, чтобы операция из нескольких шагов была атомарной."""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def get_pair_relations(self, first_id: uuid.UUID, second_id: uuid.UUID) -> list[UserRelation]:
+        """Все строки между двумя пользователями в обе стороны."""
+        stmt = select(UserRelation).where(
+            or_(
+                and_(UserRelation.user_id == first_id, UserRelation.target_id == second_id),
+                and_(UserRelation.user_id == second_id, UserRelation.target_id == first_id),
+            )
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    def add_relation(self, user_id: uuid.UUID, target_id: uuid.UUID, status: RelationStatus) -> None:
+        self.session.add(UserRelation(user_id=user_id, target_id=target_id, status=status))
+
+    async def delete_relation(self, relation: UserRelation) -> None:
+        await self.session.delete(relation)
+
+    async def get_friends(self, user_id: uuid.UUID, limit: int, offset: int) -> list[User]:
+        # Строка дружбы направленная, поэтому друг может стоять с любой её стороны.
+        stmt = (
+            select(User)
+            .join(
+                UserRelation,
+                or_(
+                    and_(UserRelation.user_id == user_id, UserRelation.target_id == User.id),
+                    and_(UserRelation.target_id == user_id, UserRelation.user_id == User.id),
+                ),
+            )
+            .where(UserRelation.status == RelationStatus.ACCEPTED)
+            .order_by(User.username)
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def get_incoming_requests(self, user_id: uuid.UUID, limit: int) -> list[User]:
+        """Пользователи, которые отправили заявку user_id; новые заявки первыми."""
+        stmt = (
+            select(User)
+            .join(UserRelation, UserRelation.user_id == User.id)
+            .where(UserRelation.target_id == user_id, UserRelation.status == RelationStatus.PENDING)
+            .order_by(UserRelation.id.desc())
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def get_outgoing_requests(self, user_id: uuid.UUID, limit: int) -> list[User]:
+        """Пользователи, которым user_id отправил заявку; новые заявки первыми."""
+        stmt = (
+            select(User)
+            .join(UserRelation, UserRelation.target_id == User.id)
+            .where(UserRelation.user_id == user_id, UserRelation.status == RelationStatus.PENDING)
+            .order_by(UserRelation.id.desc())
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+=== src/friends/router.py ===
+import uuid
+from typing import Annotated
+
+from fastapi import APIRouter, HTTPException, Query, status, BackgroundTasks
+from src.social.enums import RelationStatus
+from src.achievements.service import AchievementsService
+from src.auth.deps import CurrentUserIdDep, SessionDep
+from src.exceptions.friends_exceptions import FriendsConflictError, FriendsNotFoundError
+from src.friends.schemas import FriendRequestsSchema, FriendSchema, RelationStatusSchema
+from src.friends.service import FriendsService
+
+router = APIRouter(prefix="/friends", tags=["🤝 Friends"])
+
+LimitQuery = Annotated[int, Query(ge=1, le=100)]
+OffsetQuery = Annotated[int, Query(ge=0)]
+
+
+# == GET FRIENDS ==
+@router.get("", response_model=list[FriendSchema], description="Список друзей")
+async def get_friends(user_id: CurrentUserIdDep, session: SessionDep, limit: LimitQuery = 50, offset: OffsetQuery = 0):
+    return await FriendsService(session=session).get_friends(user_id=user_id, limit=limit, offset=offset)
+
+
+# == GET REQUESTS ==
+@router.get("/requests", response_model=FriendRequestsSchema, description="Входящие и исходящие заявки")
+async def get_requests(user_id: CurrentUserIdDep, session: SessionDep, limit: LimitQuery = 50):
+    return await FriendsService(session=session).get_requests(user_id=user_id, limit=limit)
+
+
+# == SEND REQUEST ==
+@router.post(
+    "/requests/{target_id}",
+    status_code=status.HTTP_201_CREATED,
+    response_model=RelationStatusSchema,
+    description="Отправить заявку. Если от этого пользователя уже есть встречная — она принимается",
+)
+async def send_request(target_id: uuid.UUID, user_id: CurrentUserIdDep, session: SessionDep, bt: BackgroundTasks):
+    try:
+        result = await FriendsService(session=session).send_request(user_id=user_id, target_id=target_id)
+        if result.status == RelationStatus.ACCEPTED:
+            bt.add_task(AchievementsService.process_achievements_friends_bt, user_id=user_id)
+            bt.add_task(AchievementsService.process_achievements_friends_bt, user_id=target_id)
+        return result
+    except FriendsNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except FriendsConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+# == DECLINE REQUEST ==
+@router.delete("/requests/{sender_id}", status_code=status.HTTP_204_NO_CONTENT, description="Отклонить входящую заявку")
+async def decline_request(sender_id: uuid.UUID, user_id: CurrentUserIdDep, session: SessionDep) -> None:
+    try:
+        await FriendsService(session=session).decline_request(user_id=user_id, sender_id=sender_id)
+    except FriendsNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+# == BLOCK USER ==
+@router.post(
+    "/blocks/{target_id}",
+    status_code=status.HTTP_201_CREATED,
+    response_model=RelationStatusSchema,
+    description="Заблокировать пользователя: заявки и дружба с ним удаляются",
+)
+async def block_user(target_id: uuid.UUID, user_id: CurrentUserIdDep, session: SessionDep):
+    try:
+        return await FriendsService(session=session).block_user(user_id=user_id, target_id=target_id)
+    except FriendsNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except FriendsConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+# == ACCEPT REQUEST ==
+@router.post(
+    "/{sender_id}",
+    status_code=status.HTTP_201_CREATED,
+    response_model=RelationStatusSchema,
+    description="Принять входящую заявку",
+)
+async def accept_request(sender_id: uuid.UUID, user_id: CurrentUserIdDep, session: SessionDep, bt: BackgroundTasks):
+    try:
+        result =  await FriendsService(session=session).accept_request(user_id=user_id, sender_id=sender_id)
+        bt.add_task(AchievementsService.process_achievements_friends_bt, user_id=user_id)
+        bt.add_task(AchievementsService.process_achievements_friends_bt, user_id=sender_id)
+        return result
+    except FriendsNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+# == DELETE FRIEND ==
+@router.delete("/{friend_id}", status_code=status.HTTP_204_NO_CONTENT, description="Удалить из друзей")
+async def delete_friend(friend_id: uuid.UUID, user_id: CurrentUserIdDep, session: SessionDep) -> None:
+    try:
+        await FriendsService(session=session).delete_friend(user_id=user_id, friend_id=friend_id)
+    except FriendsNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+=== src/friends/schemas.py ===
+import uuid
+
+from pydantic import BaseModel, ConfigDict, field_validator
+
+from src.social.enums import RelationStatus
+from src.users.pfp.minio import DEFAULT_PFP_URL
+
+
+class FriendSchema(BaseModel):
+    # берётся из User
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    username: str
+    pfp_url: str
+
+    @field_validator("pfp_url", mode="before")
+    @classmethod
+    def set_default_pfp(cls, v: str | None) -> str:
+        return v or DEFAULT_PFP_URL
+
+
+class FriendRequestsSchema(BaseModel):
+    incoming: list[FriendSchema]
+    outgoing: list[FriendSchema]
+
+
+class RelationStatusSchema(BaseModel):
+    status: RelationStatus
+
+=== src/friends/service.py ===
+import uuid
+
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.exceptions.friends_exceptions import FriendsConflictError, FriendsNotFoundError
+from src.friends.models import UserRelation
+from src.friends.repository import FriendsRepository
+from src.friends.schemas import FriendRequestsSchema, FriendSchema, RelationStatusSchema
+from src.social.enums import RelationStatus
+from src.users.repository import UsersRepository
+
+
+class FriendsService:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+        self.repo = FriendsRepository(session=session)
+        self.users_repo = UsersRepository(session=session)
+
+    async def send_request(self, user_id: uuid.UUID, target_id: uuid.UUID) -> RelationStatusSchema:
+        await self._check_target(user_id=user_id, target_id=target_id)
+        relations = await self.repo.get_pair_relations(user_id, target_id)
+
+        statuses = {relation.status for relation in relations}
+        if RelationStatus.BLOCKED in statuses:
+            # Кто кого заблокировал, не уточняем: о чужой блокировке пользователю знать не нужно.
+            raise FriendsConflictError("Нельзя отправить заявку этому пользователю")
+        if RelationStatus.ACCEPTED in statuses:
+            raise FriendsConflictError("Вы уже друзья")
+
+        incoming = self._find(relations, sender_id=target_id, status=RelationStatus.PENDING)
+        if incoming is not None:
+            # Встречная заявка уже лежит — значит, оба согласны, сразу дружим.
+            incoming.status = RelationStatus.ACCEPTED
+            await self.session.commit()
+            return RelationStatusSchema(status=RelationStatus.ACCEPTED)
+
+        if self._find(relations, sender_id=user_id, status=RelationStatus.PENDING) is not None:
+            raise FriendsConflictError("Заявка уже отправлена")
+
+        self.repo.add_relation(user_id=user_id, target_id=target_id, status=RelationStatus.PENDING)
+        try:
+            await self.session.commit()
+        except IntegrityError as exc:
+            # Такой же запрос успел пройти между нашей проверкой и вставкой — сработал unique (user_id, target_id).
+            await self.session.rollback()
+            raise FriendsConflictError("Заявка уже отправлена") from exc
+        return RelationStatusSchema(status=RelationStatus.PENDING)
+
+    async def accept_request(self, user_id: uuid.UUID, sender_id: uuid.UUID) -> RelationStatusSchema:
+        request = await self._get_incoming_request(user_id=user_id, sender_id=sender_id)
+        request.status = RelationStatus.ACCEPTED
+        await self.session.commit()
+        return RelationStatusSchema(status=RelationStatus.ACCEPTED)
+
+    async def decline_request(self, user_id: uuid.UUID, sender_id: uuid.UUID) -> None:
+        request = await self._get_incoming_request(user_id=user_id, sender_id=sender_id)
+        await self.repo.delete_relation(request)
+        await self.session.commit()
+
+    async def delete_friend(self, user_id: uuid.UUID, friend_id: uuid.UUID) -> None:
+        relations = await self.repo.get_pair_relations(user_id, friend_id)
+        friendship = next((relation for relation in relations if relation.status == RelationStatus.ACCEPTED), None)
+        if friendship is None:
+            raise FriendsNotFoundError("Этого пользователя нет в друзьях")
+        await self.repo.delete_relation(friendship)
+        await self.session.commit()
+
+    async def block_user(self, user_id: uuid.UUID, target_id: uuid.UUID) -> RelationStatusSchema:
+        await self._check_target(user_id=user_id, target_id=target_id)
+        relations = await self.repo.get_pair_relations(user_id, target_id)
+
+        # Заявка и дружба разрываются; встречную блокировку не трогаем — она чужая.
+        for relation in relations:
+            if relation.status != RelationStatus.BLOCKED:
+                await self.repo.delete_relation(relation)
+
+        if self._find(relations, sender_id=user_id, status=RelationStatus.BLOCKED) is None:
+            # flush: удаление должно уйти в БД раньше вставки, иначе сработает unique (user_id, target_id).
+            await self.session.flush()
+            self.repo.add_relation(user_id=user_id, target_id=target_id, status=RelationStatus.BLOCKED)
+
+        await self.session.commit()
+        return RelationStatusSchema(status=RelationStatus.BLOCKED)
+
+    async def get_friends(self, user_id: uuid.UUID, limit: int, offset: int) -> list[FriendSchema]:
+        friends = await self.repo.get_friends(user_id=user_id, limit=limit, offset=offset)
+        return [FriendSchema.model_validate(friend) for friend in friends]
+
+    async def get_requests(self, user_id: uuid.UUID, limit: int) -> FriendRequestsSchema:
+        incoming = await self.repo.get_incoming_requests(user_id=user_id, limit=limit)
+        outgoing = await self.repo.get_outgoing_requests(user_id=user_id, limit=limit)
+        return FriendRequestsSchema(
+            incoming=[FriendSchema.model_validate(user) for user in incoming],
+            outgoing=[FriendSchema.model_validate(user) for user in outgoing],
+        )
+
+    async def _check_target(self, user_id: uuid.UUID, target_id: uuid.UUID) -> None:
+        if user_id == target_id:
+            raise FriendsConflictError("Нельзя выполнить это действие с самим собой")
+        if await self.users_repo.get_user_by_id(target_id) is None:
+            raise FriendsNotFoundError("Пользователь не найден")
+
+    async def _get_incoming_request(self, user_id: uuid.UUID, sender_id: uuid.UUID) -> UserRelation:
+        relations = await self.repo.get_pair_relations(user_id, sender_id)
+        request = self._find(relations, sender_id=sender_id, status=RelationStatus.PENDING)
+        if request is None:
+            raise FriendsNotFoundError("Заявка не найдена")
+        return request
+
+    @staticmethod
+    def _find(relations: list[UserRelation], sender_id: uuid.UUID, status: RelationStatus) -> UserRelation | None:
+        """Строка с нужным статусом, которую создал sender_id."""
+        for relation in relations:
+            if relation.user_id == sender_id and relation.status == status:
+                return relation
+        return None
+
+=== src/habits/enums.py ===
+import enum
+
+
+class Visibility(enum.StrEnum):
+    PRIVATE = "private"  # только владелец (и партнёр по совместной привычке)
+    FRIENDS = "friends"  # владелец и друзья
+    PUBLIC = "public"    # любой пользователь, кроме заблокированных
+
+
+class InviteStatus(enum.StrEnum):
+    PENDING = "pending"
+    ACCEPTED = "accepted"
+    # Отклонить или отменить = удалить строку. BLOCKED тут невозможен по типу.
+
+=== src/habits/models.py ===
+import uuid
+from datetime import date, datetime, time
+from typing import TYPE_CHECKING
+
+from sqlalchemy import (
+    ARRAY,
+    CheckConstraint,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Time,
+    UniqueConstraint,
+    text,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from database.db import Base
+from database.enum import str_enum
+from database.mixins import TimeStampMixin, Uuid7PkMixin
+from src.habits.enums import InviteStatus, Visibility
+
+if TYPE_CHECKING:
+    from src.feed.models import Review
+    from src.users.models import User
+
+
+class Habit(Uuid7PkMixin, TimeStampMixin, Base):
+    __tablename__ = "habits"
+
+    creator_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(String(100))
+
+    # формат проверяет Pydantic
+    color_hex: Mapped[str] = mapped_column(String(7), default="#4F46E5", server_default="#4F46E5")
+
+    current_streak_days: Mapped[int] = mapped_column(Integer, server_default="0", default=0)
+    streak_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    max_streak_days: Mapped[int] = mapped_column(Integer, server_default="0", default=0)
+
+    # По умолчанию FRIENDS: так не-друзья ничего не видят.
+    visibility: Mapped[Visibility] = mapped_column(
+        str_enum(Visibility), default=Visibility.FRIENDS, server_default=Visibility.FRIENDS.value
+    )
+
+    # Первый день отсчёта: сегодня в часовом поясе создателя. Без default, ставит сервис.
+    start_date: Mapped[date] = mapped_column(Date)
+
+    # До 3 напоминаний, время в часовом поясе пользователя.
+    notification_times: Mapped[list[time]] = mapped_column(ARRAY(Time), default=list, server_default=text("'{}'"))
+
+    # Когда ушло последнее напоминание. По одному этому полю определяем, какие из слотов
+    # за сегодня уже отправлены (слот отправлен, если last_reminded_at >= время слота).
+    # В v1 напоминания получает только создатель.
+    last_reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    creator: Mapped["User"] = relationship(back_populates="habits")
+    logs: Mapped[list["HabitLog"]] = relationship(back_populates="habit")
+    shared_habit_user: Mapped["SharedHabitUser"] = relationship(back_populates="habit")
+    reviews: Mapped[list["Review"]] = relationship(back_populates="habit")
+
+    __table_args__ = (CheckConstraint("cardinality(notification_times) <= 3", name="max_3_reminders"),)
+
+
+class SharedHabitUser(Uuid7PkMixin, TimeStampMixin, Base):
+    """
+    Партнёр по совместной привычке. Создатель сюда НЕ пишется, он уже в habits.creator_id.
+    Участники = creator_id + user_id (если status = accepted).
+    Партнёр отмечает выполнение в habit_logs со своим user_id.
+    Совместный стрик = пересечение дат логов создателя и партнёра по этой привычке.
+    Отклонить или отменить приглашение = удалить строку.
+    Выход партнёра или разрыв дружбы = удалить строку и логи партнёра по этой привычке;
+    привычка остаётся у создателя как личная.
+    """
+
+    __tablename__ = "shared_habit_users"
+
+    # unique=True: в v1 только пара. Для групп замените на UniqueConstraint("habit_id", "user_id").
+    habit_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("habits.id", ondelete="CASCADE"), unique=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    status: Mapped[InviteStatus] = mapped_column(
+        str_enum(InviteStatus), default=InviteStatus.PENDING, server_default=InviteStatus.PENDING.value
+    )
+    # Начало совместного отсчёта (для процентов). Ставит сервис при принятии.
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    habit: Mapped["Habit"] = relationship(back_populates="shared_habit_user")
+    user: Mapped["User"] = relationship(back_populates="shared_habit_users")
+
+
+class HabitLog(Uuid7PkMixin, TimeStampMixin, Base):
+    __tablename__ = "habit_logs"
+
+    # Пользователь может отмечать привычку только если:
+    # 1. он является создателем привычки;
+    # 2. или он принят как партнёр в shared_habit_users.
+    # Это бизнес-правило проверяется в service layer.
+
+    habit_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("habits.id", ondelete="CASCADE"))
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+
+    # Календарный день в часовом поясе пользователя. БЕЗ default=date.today:
+    # это дата сервера, а не пользователя. Дату считает сервис.
+    completed_date: Mapped[date] = mapped_column(Date)
+
+    habit: Mapped["Habit"] = relationship(back_populates="logs")
+    user: Mapped["User"] = relationship(back_populates="habit_logs")
+
+    __table_args__ = (
+        # Одна отметка в день на человека. Покрывает и запросы «все отметки привычки».
+        UniqueConstraint("habit_id", "user_id", "completed_date"),
+        # История пользователя по всем привычкам за диапазон дат.
+        Index("ix_habit_logs_user_date", "user_id", "completed_date"),
+    )
+
+=== src/habits/repository.py ===
+import uuid
+from datetime import date, datetime, time
+from typing import Any
+
+from sqlalchemy import delete, exists, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.habits.enums import InviteStatus, Visibility
+from src.habits.models import Habit, HabitLog, SharedHabitUser
+
+
+class HabitLogRepository:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def mark_completed(
+        self,
+        *,
+        user_id: uuid.UUID,
+        habit_id: uuid.UUID,
+        completed_date: date,
+    ) -> HabitLog:
+        habit = await self.session.get(Habit, habit_id)
+        if habit is None:
+            raise ValueError(f"Привычка {habit_id} не найдена")
+
+        if not await self._user_can_log_habit(user_id=user_id, habit=habit):
+            raise ValueError(f"Привычка {habit_id} не найдена")
+
+        log = HabitLog(
+            habit_id=habit_id,
+            user_id=user_id,
+            completed_date=completed_date,
+        )
+        self.session.add(log)
+        try:
+            await self.session.flush()
+        except IntegrityError as exc:
+            await self.session.rollback()
+            raise ValueError(f"Привычка {habit_id} уже отмечена выполненной на {completed_date}") from exc
+
+        await self.session.commit()
+        await self.session.refresh(log)
+        return log
+
+    async def get_log_by_date(
+        self,
+        *,
+        user_id: uuid.UUID,
+        habit_id: uuid.UUID,
+        completed_date: date,
+    ) -> HabitLog | None:
+        stmt = select(HabitLog).where(
+            HabitLog.user_id == user_id,
+            HabitLog.habit_id == habit_id,
+            HabitLog.completed_date == completed_date,
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def delete_log_instance(self, log: HabitLog) -> None:
+        await self.session.delete(log)
+        await self.session.flush()
+
+    async def get_logs_in_range(
+        self,
+        *,
+        user_id: uuid.UUID,
+        date_from: date,
+        date_to: date,
+        habit_id: uuid.UUID | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[HabitLog]:
+        if date_from > date_to:
+            raise ValueError("Первая дата не может быть больше последней")
+
+        stmt = (
+            select(HabitLog)
+            .where(
+                HabitLog.user_id == user_id,
+                HabitLog.completed_date >= date_from,
+                HabitLog.completed_date <= date_to,
+            )
+            .order_by(HabitLog.completed_date.asc(), HabitLog.id.asc())
+            .limit(limit)
+            .offset(offset)
+        )
+        if habit_id is not None:
+            stmt = stmt.where(HabitLog.habit_id == habit_id)
+
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def get_completed_habits_by_date(
+        self,
+        *,
+        user_id: uuid.UUID,
+        target_date: date,
+    ) -> list[Habit]:
+        stmt = (
+            select(Habit)
+            .join(HabitLog, HabitLog.habit_id == Habit.id)
+            .where(
+                HabitLog.user_id == user_id,
+                HabitLog.completed_date == target_date,
+            )
+            .order_by(Habit.title.asc())
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().unique().all())
+
+    async def get_uncompleted_habits_by_date(
+        self,
+        *,
+        user_id: uuid.UUID,
+        target_date: date,
+    ) -> list[Habit]:
+        created_ids = select(Habit.id).where(
+            Habit.creator_id == user_id,
+            Habit.start_date <= target_date,
+        )
+        shared_ids = (
+            select(Habit.id)
+            .join(SharedHabitUser, SharedHabitUser.habit_id == Habit.id)
+            .where(
+                SharedHabitUser.user_id == user_id,
+                SharedHabitUser.status == InviteStatus.ACCEPTED,
+                Habit.start_date <= target_date,
+            )
+        )
+        completed_subq = select(HabitLog.habit_id).where(
+            HabitLog.user_id == user_id,
+            HabitLog.completed_date == target_date,
+        )
+        stmt = (
+            select(Habit)
+            .where(
+                Habit.id.in_(created_ids.union(shared_ids)),
+                Habit.id.not_in(completed_subq),
+            )
+            .order_by(Habit.title.asc())
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().unique().all())
+
+    async def get_log_dates(self, *, user_id: uuid.UUID, habit_id: uuid.UUID) -> list[date]:
+        stmt = (
+            select(HabitLog.completed_date)
+            .where(HabitLog.user_id == user_id, HabitLog.habit_id == habit_id)
+            .order_by(HabitLog.completed_date.asc())
+        )
+        return list((await self.session.execute(stmt)).scalars().all())
+
+    async def _user_can_log_habit(
+        self,
+        *,
+        user_id: uuid.UUID,
+        habit: Habit,
+    ) -> bool:
+        """Проверить, что юзер — создатель привычки или принятый партнёр."""
+        if habit.creator_id == user_id:
+            return True
+
+        stmt = select(SharedHabitUser.id).where(
+            SharedHabitUser.habit_id == habit.id,
+            SharedHabitUser.user_id == user_id,
+            SharedHabitUser.status == InviteStatus.ACCEPTED,
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none() is not None
+
+
+class HabitsRepository:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def create_habit(
+        self,
+        creator_id: uuid.UUID,
+        title: str,
+        color_hex: str,
+        visibility: Visibility,
+        start_date: date,
+        notification_times: list[time],
+    ) -> Habit:
+        new_habit = Habit(
+            creator_id=creator_id,
+            title=title,
+            color_hex=color_hex,
+            visibility=visibility,
+            start_date=start_date,
+            notification_times=notification_times,
+        )
+        self.session.add(new_habit)
+        await self.session.commit()
+        return new_habit
+
+    async def get_habit_by_id(self, habit_id: uuid.UUID, creator_id: uuid.UUID) -> Habit | None:
+        habit = select(Habit).where(Habit.id == habit_id, Habit.creator_id == creator_id)
+        result = await self.session.execute(habit)
+        return result.scalar_one_or_none()
+
+    async def get_all_habits(
+        self,
+        creator_id: uuid.UUID,
+        visibility: list[Visibility] | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        status: str | None = None,
+    ) -> list[Habit]:
+
+        if start_date is not None and end_date is not None and start_date > end_date:
+            raise ValueError("Начальная дата не может быть позже конечной")
+
+        stmt = select(Habit).where(Habit.creator_id == creator_id)
+
+        if visibility is not None:
+            stmt = stmt.where(Habit.visibility.in_(visibility))
+
+        if end_date is not None:
+            stmt = stmt.where(Habit.start_date <= end_date)
+
+        if status is not None:
+            log_exists = select(HabitLog.id).where(
+                HabitLog.habit_id == Habit.id,
+                HabitLog.user_id == creator_id,
+            )
+
+            if start_date is not None:
+                log_exists = log_exists.where(HabitLog.completed_date >= start_date)
+
+            if end_date is not None:
+                log_exists = log_exists.where(HabitLog.completed_date <= end_date)
+
+            condition = ~exists(log_exists) if status == "uncompleted" else exists(log_exists)
+            stmt = stmt.where(condition)
+
+        stmt = stmt.order_by(Habit.created_at.desc(), Habit.id).limit(limit).offset(offset)
+
+        result = await self.session.execute(stmt)
+        return result.scalars().all()
+
+    async def update_habit(
+        self,
+        habit_id: uuid.UUID,
+        creator_id: uuid.UUID,
+        updates: dict[str, Any],
+    ) -> Habit | None:
+        habit = await self.get_habit_by_id(habit_id=habit_id, creator_id=creator_id)
+
+        if habit is None:
+            return None
+
+        for field, value in updates.items():
+            setattr(habit, field, value)
+
+        await self.session.commit()
+        await self.session.refresh(habit)
+        return habit
+
+    async def delete_habit(self, habit_id: uuid.UUID, creator_id: uuid.UUID) -> bool:
+        stmt = (
+            delete(Habit)
+            .where(
+                Habit.id == habit_id,
+                Habit.creator_id == creator_id,
+            )
+            .returning(Habit.id)
+        )
+        result = await self.session.execute(stmt)
+        await self.session.commit()
+        return result.scalar_one_or_none() is not None
+
+    async def update_streak(
+        self,
+        habit_id: uuid.UUID,
+        creator_id: uuid.UUID,
+        current_streak_days: int,
+        max_streak_days: int,
+        streak_expires_at: datetime | None,
+    ) -> Habit | None:
+        return await self.update_habit(
+            habit_id=habit_id,
+            creator_id=creator_id,
+            updates={
+                "current_streak_days": current_streak_days,
+                "max_streak_days": max_streak_days,
+                "streak_expires_at": streak_expires_at,
+            },
+        )
+
+=== src/habits/router.py ===
+import uuid
+from datetime import date
+from typing import Literal
+
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, status
+
+from src.achievements.service import AchievementsService
+from src.auth.deps import CurrentUserDep, CurrentUserIdDep, SessionDep
+from src.habits.schemas import (
+    HabitCreateSchema,
+    HabitLogOutputSchema,
+    HabitOutputSchema,
+    HabitUpdateSchema,
+    MarkedHabitOutputSchema,
+)
+from src.habits.service import HabitLogService, HabitsService
+
+router = APIRouter(prefix="/habits", tags=["🏃 Habits"])
+
+
+# == CREATE HABIT ==
+@router.post(
+    "",
+    status_code=status.HTTP_201_CREATED,
+    response_model=HabitOutputSchema,
+    description="Create Habit",
+)
+async def create_habit(
+    habit_data: HabitCreateSchema, user_id: CurrentUserIdDep, session: SessionDep, bt: BackgroundTasks
+):
+    service = HabitsService(session=session)
+    try:
+        new_habit = await service.create_habit(habit_data=habit_data, user_id=user_id)
+        bt.add_task(AchievementsService.process_achievements_habits_bt, user_id=user_id)
+        return new_habit
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except Exception as e:
+        print(e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal Server Error",
+        )
+
+
+# == GET HABITS ==
+@router.get(
+    "",
+    status_code=status.HTTP_200_OK,
+    response_model=list[HabitOutputSchema],
+    description="Get Habits",
+)
+async def get_habits(
+    user_id: CurrentUserIdDep,
+    session: SessionDep,
+    target_user_id: uuid.UUID | None = Query(default=None),
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+    habit_status: Literal["completed", "uncompleted"] | None = Query(default=None, alias="status"),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
+    service = HabitsService(session=session)
+    try:
+        return await service.get_habits(
+            user_id=user_id,
+            target_user_id=target_user_id,
+            start_date=start_date,
+            end_date=end_date,
+            status=habit_status,
+            limit=limit,
+            offset=offset,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
+
+
+# == GET HABIT LOGS ==
+@router.get(
+    "/logs",
+    status_code=status.HTTP_200_OK,
+    response_model=list[HabitLogOutputSchema],
+    description="Get habit logs",
+)
+async def get_logs_in_range(
+    user_id: CurrentUserIdDep,
+    date_from: date,
+    date_to: date,
+    session: SessionDep,
+    habit_id: uuid.UUID | None = None,
+    limit: int = Query(default=500, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+):
+    service = HabitLogService(session=session)
+    try:
+        return await service.get_logs_in_range(
+            user_id=user_id,
+            date_from=date_from,
+            date_to=date_to,
+            habit_id=habit_id,
+            limit=limit,
+            offset=offset,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
+
+
+# == GET COMPLETED HABITS ==
+@router.get(
+    "/logs/completed",
+    status_code=status.HTTP_200_OK,
+    response_model=list[HabitOutputSchema],
+    description="Get completed habits",
+)
+async def get_completed_habits(user_id: CurrentUserIdDep, target_date: date, session: SessionDep):
+    service = HabitLogService(session=session)
+    try:
+        return await service.get_completed_habits_by_date(user_id=user_id, target_date=target_date)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
+
+
+# == GET UNCOMPLETED HABITS ==
+@router.get(
+    "/logs/uncompleted",
+    status_code=status.HTTP_200_OK,
+    response_model=list[HabitOutputSchema],
+    description="Get uncompleted habits",
+)
+async def get_uncompleted_habits(user_id: CurrentUserIdDep, target_date: date, session: SessionDep):
+    service = HabitLogService(session=session)
+    try:
+        return await service.get_uncompleted_habits_by_date(user_id=user_id, target_date=target_date)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
+
+
+# == GET HABIT ==
+@router.get(
+    "/{habit_id}",
+    status_code=status.HTTP_200_OK,
+    response_model=HabitOutputSchema,
+    description="Get Habit",
+)
+async def get_habit(user_id: CurrentUserIdDep, habit_id: uuid.UUID, session: SessionDep):
+    service = HabitsService(session=session)
+    try:
+        habit = await service.get_habit(user_id=user_id, habit_id=habit_id)
+        if habit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Habit not found")
+        return habit
+
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
+
+
+# == EDIT HABIT ==
+@router.patch(
+    "/{habit_id}",
+    status_code=status.HTTP_200_OK,
+    response_model=HabitOutputSchema,
+    description="Update Habit",
+)
+async def update_habit(user_id: CurrentUserIdDep, habit_id: uuid.UUID, data: HabitUpdateSchema, session: SessionDep):
+    service = HabitsService(session=session)
+    try:
+        habit = await service.update_habit(user_id=user_id, habit_id=habit_id, habit_data=data)
+        if habit is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Habit not found")
+        return habit
+
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
+
+
+# == DELETE HABIT ==
+@router.delete("/{habit_id}", status_code=status.HTTP_200_OK, description="Delete Habit")
+async def delete_habit(user_id: CurrentUserIdDep, habit_id: uuid.UUID, session: SessionDep):
+    service = HabitsService(session=session)
+    try:
+        deleted = await service.delete_habit(user_id=user_id, habit_id=habit_id)
+        if not deleted:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Habit not found")
+        return {"detail": "Habit deleted"}
+
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
+
+
+# == COMPLETE OR UNCOMPLETE HABIT ==
+@router.patch(
+    "/{habit_id}/toggle",
+    status_code=status.HTTP_200_OK,
+    response_model=MarkedHabitOutputSchema,
+    description="Click on habit (complete or uncomplete)",
+)
+async def mark_habit(current_user: CurrentUserDep, session: SessionDep, habit_id: uuid.UUID, bt: BackgroundTasks):
+    service = HabitsService(session=session)
+    try:
+        updated_habit = await service.mark_habit(habit_id=habit_id, current_user=current_user)
+        if updated_habit.is_completed:
+            bt.add_task(AchievementsService.process_achievements_task_bt,
+                user_id=current_user.id,
+                streak_days=updated_habit.habit.current_streak_days,
+            )
+        return updated_habit
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
+
+=== src/habits/schemas.py ===
+import uuid
+from datetime import date, datetime, time, timezone
+from typing import Annotated
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from src.habits.enums import Visibility
+
+
+class HabitLogCreateSchema(BaseModel):
+    """Схема создания отметки о выполнении привычки."""
+
+    completed_date: date | None = Field(
+        default=None,
+        description="Календарный день в TZ пользователя. Если None — сервис подставит сегодня.",
+    )
+
+    @field_validator("completed_date")
+    @classmethod
+    def not_in_future(cls, v: date | None) -> date | None:
+        if v is not None and v > date.today():
+            raise ValueError("Дата не может быть в будущем")
+        return v
+
+
+class HabitCreateSchema(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    title: Annotated[str, Field(min_length=1, max_length=100)]
+    color_hex: Annotated[str, Field(pattern=r"^#[0-9A-Fa-f]{6}$")] = "#4F46E5"
+    visibility: Visibility = Visibility.FRIENDS
+    notification_times: Annotated[list[time], Field(max_length=3)] = Field(default_factory=list)
+
+
+class HabitUpdateSchema(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    title: Annotated[str | None, Field(min_length=1, max_length=100)] = None
+    color_hex: Annotated[str | None, Field(pattern=r"^#[0-9A-Fa-f]{6}$")] = None
+    visibility: Visibility | None = None
+    notification_times: Annotated[list[time] | None, Field(max_length=3)] = None
+
+
+class HabitOutputSchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    title: str
+    color_hex: str
+    visibility: Visibility
+    start_date: date
+    notification_times: list[time]
+    current_streak_days: int
+    max_streak_days: int
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_habit(cls, habit) -> "HabitOutputSchema":
+        out = cls.model_validate(habit)
+        expires = habit.streak_expires_at
+        if out.current_streak_days and (expires is None or expires <= datetime.now(timezone.utc)):
+            out.current_streak_days = 0
+        return out
+
+
+class HabitLogOutputSchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    created_at: datetime
+    updated_at: datetime
+    habit_id: uuid.UUID
+    user_id: uuid.UUID
+    completed_date: date
+
+
+
+class MarkedHabitOutputSchema(BaseModel):
+    is_completed: bool
+    log: HabitLogOutputSchema | None = None
+    habit: HabitOutputSchema
+
+=== src/habits/service.py ===
+import uuid
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.friends.repository import FriendsRepository
+from src.habits.enums import Visibility
+from src.habits.models import Habit
+from src.habits.repository import HabitLogRepository, HabitsRepository
+from src.habits.schemas import (
+    HabitCreateSchema,
+    HabitLogOutputSchema,
+    HabitOutputSchema,
+    HabitUpdateSchema,
+    MarkedHabitOutputSchema,
+)
+from src.social.enums import RelationStatus
+from src.users.models import User
+
+
+def calc_streaks(dates: list[date], tz: ZoneInfo) -> tuple[int, int, datetime | None]:
+    if not dates:
+        return 0, 0, None
+    run = best = 1
+    for prev, cur in zip(dates, dates[1:]):
+        run = run + 1 if (cur - prev).days == 1 else 1
+        best = max(best, run)
+    expires = datetime.combine(dates[-1] + timedelta(days=2), datetime.min.time(), tzinfo=tz)
+    return run, best, expires
+
+class HabitLogService:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+        self.repo = HabitLogRepository(session=session)
+
+    async def mark_completed(self, user_id: uuid.UUID, habit_id: uuid.UUID, completed_date: date | None = None):
+        user = await self.session.get(User, user_id)
+        if user is None:
+            raise ValueError("Пользователь не найден")
+        if not user.timezone:
+            raise ValueError("Часовой пояс пользователя не указан")
+
+        try:
+            user_timezone = ZoneInfo(user.timezone)
+        except ZoneInfoNotFoundError:
+            raise ValueError("Некорректный часовой пояс пользователя")
+
+        date_today = datetime.now(user_timezone).date()
+
+        if completed_date is None:
+            completed_date = date_today
+
+        if completed_date > date_today:
+            raise ValueError("Нельзя отметить привычку выполненной в будущем")
+
+        log = await self.repo.mark_completed(user_id=user_id, habit_id=habit_id, completed_date=completed_date)
+        return HabitLogOutputSchema.model_validate(log)
+
+    async def get_logs_in_range(
+        self,
+        user_id: uuid.UUID,
+        date_from: date,
+        date_to: date,
+        habit_id: uuid.UUID | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        logs = await self.repo.get_logs_in_range(
+            user_id=user_id,
+            date_from=date_from,
+            date_to=date_to,
+            habit_id=habit_id,
+            limit=limit,
+            offset=offset,
+        )
+        return [HabitLogOutputSchema.model_validate(log) for log in logs]
+
+    async def get_completed_habits_by_date(self, user_id: uuid.UUID, target_date: date):
+        completed_habits = await self.repo.get_completed_habits_by_date(user_id=user_id, target_date=target_date)
+        return [HabitOutputSchema.from_habit(completed_habit) for completed_habit in completed_habits]
+
+    async def get_uncompleted_habits_by_date(self, user_id: uuid.UUID, target_date: date):
+        uncompleted_habits = await self.repo.get_uncompleted_habits_by_date(user_id=user_id, target_date=target_date)
+        return [HabitOutputSchema.from_habit(uncompleted_habit) for uncompleted_habit in uncompleted_habits]
+
+
+class HabitsService:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+        self.habit_repo = HabitsRepository(session=session)
+        self.habit_log_repo = HabitLogRepository(session=session)
+        self.friends_repo = FriendsRepository(session=session)
+
+    async def create_habit(self, user_id: uuid.UUID, habit_data: HabitCreateSchema):
+        user = await self.session.get(User, user_id)
+        if user is None:
+            raise ValueError("Пользователь не найден")
+        start_date = datetime.now(ZoneInfo(user.timezone)).date()
+        habit = await self.habit_repo.create_habit(
+            creator_id=user_id,
+            title=habit_data.title,
+            color_hex=habit_data.color_hex,
+            visibility=habit_data.visibility,
+            start_date=start_date,
+            notification_times=habit_data.notification_times,
+        )
+        return HabitOutputSchema.from_habit(habit)
+
+    async def get_habit(self, user_id: uuid.UUID, habit_id: uuid.UUID):
+        habit = await self.habit_repo.get_habit_by_id(habit_id=habit_id, creator_id=user_id)
+        if habit is None:
+            return None
+        return HabitOutputSchema.from_habit(habit)
+
+    async def get_habits(
+        self,
+        user_id: uuid.UUID,
+        visibility: list[Visibility] | None = None,
+        target_user_id: uuid.UUID | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        if target_user_id is None or target_user_id == user_id:
+            target_user_id = user_id
+        else:
+            relations = await self.friends_repo.get_pair_relations(first_id=user_id, second_id=target_user_id)
+            is_friend = any(relation.status == RelationStatus.ACCEPTED for relation in relations)
+            is_blocked = any(
+                relation.status == RelationStatus.BLOCKED
+                and relation.user_id == target_user_id
+                and relation.target_id == user_id
+                for relation in relations
+            )
+
+            if is_blocked:
+                raise ValueError("Доступ к привычкам пользователя запрещён")
+
+            if is_friend:
+                visibility = [Visibility.FRIENDS, Visibility.PUBLIC]
+            else:
+                visibility = [Visibility.PUBLIC]
+
+        habits = await self.habit_repo.get_all_habits(
+            creator_id=target_user_id,
+            visibility=visibility,
+            start_date=start_date,
+            end_date=end_date,
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
+        return [HabitOutputSchema.from_habit(habit) for habit in habits]
+
+    async def update_habit(self, user_id: uuid.UUID, habit_id: uuid.UUID, habit_data: HabitUpdateSchema):
+        updates = habit_data.model_dump(exclude_unset=True)
+        if not updates:
+            raise ValueError("Необходимо указать хотя бы одно поле для обновления")
+        if any(value is None for value in updates.values()):
+            raise ValueError("Значение None для полей не допустимо")
+
+        habit = await self.habit_repo.update_habit(habit_id=habit_id, creator_id=user_id, updates=updates)
+        if habit is None:
+            return None
+
+        return HabitOutputSchema.from_habit(habit)
+
+    async def delete_habit(self, user_id: uuid.UUID, habit_id: uuid.UUID):
+        return await self.habit_repo.delete_habit(habit_id=habit_id, creator_id=user_id)
+
+    async def mark_habit(self, habit_id: uuid.UUID, current_user: User) -> MarkedHabitOutputSchema:
+        habit = await self.session.get(Habit, habit_id)
+        if not habit:
+            raise ValueError("Привычка не найдена")
+
+        if not await self.habit_log_repo._user_can_log_habit(user_id=current_user.id, habit=habit):
+            raise ValueError("Привычка не найдена")
+
+        tz = ZoneInfo(current_user.timezone or "UTC")
+        today_date = datetime.now(tz).date()
+
+        existing_log = await self.habit_log_repo.get_log_by_date(
+            user_id=current_user.id, habit_id=habit_id, completed_date=today_date
+        )
+
+        if existing_log is not None:
+            await self.habit_log_repo.delete_log_instance(existing_log)
+            updated_habit_dao = await self._recalc_streaks(habit)
+            return MarkedHabitOutputSchema(
+                is_completed=False,
+                log=None,
+                habit=HabitOutputSchema.from_habit(updated_habit_dao),
+            )
+
+        new_log_dao = await self.habit_log_repo.mark_completed(
+            user_id=current_user.id, habit_id=habit_id, completed_date=today_date
+        )
+        updated_habit_dao = await self._recalc_streaks(habit)
+        return MarkedHabitOutputSchema(
+            is_completed=True,
+            log=HabitLogOutputSchema.model_validate(new_log_dao),
+            habit=HabitOutputSchema.from_habit(updated_habit_dao),
+)
+    async def _recalc_streaks(self, habit: Habit) -> Habit:
+        creator = await self.session.get(User, habit.creator_id)
+        tz = ZoneInfo(creator.timezone or "UTC")
+        dates = await self.habit_log_repo.get_log_dates(user_id=habit.creator_id, habit_id=habit.id)
+        current, best, expires = calc_streaks(dates, tz)
+        return await self.habit_repo.update_streak(
+            habit_id=habit.id,
+            creator_id=habit.creator_id,
+            current_streak_days=current,
+            max_streak_days=best,
+            streak_expires_at=expires,
+        )
+
+=== src/social/enums.py ===
+import enum
+
+
+class RelationStatus(enum.StrEnum):
+    PENDING = "pending"    # user_id отправил заявку target_id
+    ACCEPTED = "accepted"  # дружба (направление не важно)
+    BLOCKED = "blocked"    # user_id заблокировал target_id
+
+=== src/social/models.py ===
+import uuid
+from datetime import datetime
+
+from sqlalchemy import ForeignKey, UniqueConstraint, CheckConstraint, Index, Text, DateTime, text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from typing import TYPE_CHECKING
+
+from database.db import Base
+from database.enum import str_enum
+from database.mixins import Uuid7PkMixin, TimeStampMixin
+from src.social.enums import RelationStatus
+
+if TYPE_CHECKING:
+    from src.users.models import User
+
+
+class UserRelation(Uuid7PkMixin, TimeStampMixin, Base):
+    """
+    Дружба и блокировки в одной таблице. Строка направленная:
+      PENDING  : user_id отправил заявку target_id
+      ACCEPTED : дружба
+      BLOCKED  : user_id заблокировал target_id
+
+    Допустимые наборы строк для пары (A, B):
+      пусто | A->B pending | A->B accepted (или B->A) | A->B blocked | B->A blocked | оба blocked
+    Дружба и блокировка одновременно не существуют. Инвариант держит сервис в одной транзакции:
+      - block(A, B): удалить все НЕ-blocked строки пары, затем вставить A->B blocked
+        (строку B->A blocked, если она есть, НЕ трогать);
+      - заявка A->B запрещена, если есть blocked в любую сторону;
+      - если B->A pending уже существует, заявка A->B подтверждает дружбу.
+    """
+    __tablename__ = "user_relations"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    target_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    status: Mapped[RelationStatus] = mapped_column(str_enum(RelationStatus))
+    user: Mapped["User"] = relationship(
+        back_populates="sent_relations",
+        foreign_keys=[user_id],
+    )
+
+    target: Mapped["User"] = relationship(
+        back_populates="received_relations",
+        foreign_keys=[target_id],
+    )
+
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "target_id"),
+        CheckConstraint("user_id <> target_id", name="no_self_relation"),
+        Index("ix_user_relations_target_status", "target_id", "status"),
+    )
+
+
+class Message(Uuid7PkMixin, TimeStampMixin, Base):
+    """
+    Только текст. Приглашения на совместные привычки сюда НЕ пишутся:
+    они берутся из shared_habit_users со статусом pending.
+    UUIDv7 растёт со временем, поэтому id годится для сортировки и курсорной пагинации.
+    """
+    __tablename__ = "messages"
+
+    sender_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    receiver_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    content: Mapped[str] = mapped_column(Text)  # длину (до 2000) проверяет Pydantic
+
+    # Прочитано ли получателем. По умолчанию — нет.
+    # Индекс нужен для быстрого запроса «непрочитанные от данного юзера».
+    is_read: Mapped[bool] = mapped_column(default=False, server_default=text("false"), index=True)
+    # Когда прочитано. NULL — если ещё не читали.
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    sender: Mapped["User"] = relationship(
+        back_populates="sent_messages",
+        foreign_keys=[sender_id],
+    )
+
+    receiver: Mapped["User"] = relationship(
+        back_populates="received_messages",
+        foreign_keys=[receiver_id],
+    )
+
+
+    __table_args__ = (
+        Index("ix_messages_dialog", "sender_id", "receiver_id", "id"),
+    )
+    
+
+=== src/social/repository.py ===
+import uuid
+from datetime import UTC, datetime
+
+from sqlalchemy import and_, or_, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.social.enums import RelationStatus
+from src.social.models import Message, UserRelation
+
+
+class MessagesRepository:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def create_message(
+        self,
+        sender_id: uuid.UUID,
+        receiver_id: uuid.UUID,
+        content: str,
+    ) -> Message:
+        """Создать новое сообщение."""
+        new_message = Message(
+            sender_id=sender_id,
+            receiver_id=receiver_id,
+            content=content,
+        )
+        self.session.add(new_message)
+        await self.session.commit()
+        await self.session.refresh(new_message)
+        return new_message
+
+    async def get_dialog(
+        self,
+        user1_id: uuid.UUID,
+        user2_id: uuid.UUID,
+        limit: int = 50,
+        before_id: uuid.UUID | None = None,
+    ) -> list[Message]:
+        """
+        История сообщений между двумя пользователями (в обе стороны).
+        Сортировка — по id (UUIDv7 растёт со временем).
+        Пагинация — курсорная: всё «до» before_id (для скролла вверх).
+        """
+        stmt = select(Message).where(
+            or_(
+                and_(Message.sender_id == user1_id, Message.receiver_id == user2_id),
+                and_(Message.sender_id == user2_id, Message.receiver_id == user1_id),
+            )
+        )
+        if before_id is not None:
+            stmt = stmt.where(Message.id < before_id)
+        stmt = stmt.order_by(Message.id.desc()).limit(limit)
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def mark_messages_read(
+        self,
+        message_ids: list[uuid.UUID],
+        reader_id: uuid.UUID,
+    ) -> list[Message]:
+        """
+        Пометить сообщения прочитанными.
+        Только те, где receiver_id = reader_id (нельзя пометить чужие).
+        """
+        stmt = (
+            update(Message)
+            .where(
+                Message.id.in_(message_ids),
+                Message.receiver_id == reader_id,
+                Message.is_read.is_(False),
+            )
+            .values(is_read=True, read_at=datetime.now(UTC))
+            .returning(Message)
+        )
+        result = await self.session.execute(stmt)
+        await self.session.commit()
+        return list(result.scalars().all())
+
+    async def get_unread(
+        self,
+        user_id: uuid.UUID,
+        from_user_id: uuid.UUID,
+    ) -> list[Message]:
+        """Все непрочитанные сообщения от конкретного пользователя."""
+        stmt = (
+            select(Message)
+            .where(
+                Message.receiver_id == user_id,
+                Message.sender_id == from_user_id,
+                Message.is_read.is_(False),
+            )
+            .order_by(Message.id.asc())
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def is_blocked_between(
+        self,
+        user_a: uuid.UUID,
+        user_b: uuid.UUID,
+    ) -> bool:
+        """
+        Проверить, есть ли блокировка в любую сторону между двумя пользователями.
+        Если A заблокировал B или B заблокировал A — сообщение запрещено.
+        """
+        stmt = select(UserRelation).where(
+            UserRelation.status == RelationStatus.BLOCKED,
+            ((UserRelation.user_id == user_a) & (UserRelation.target_id == user_b))
+            | ((UserRelation.user_id == user_b) & (UserRelation.target_id == user_a)),
+        ).limit(1)
+        return (await self.session.execute(stmt)).first() is not None
+
+=== src/social/router.py ===
+import uuid
+
+from fastapi import APIRouter, HTTPException, Query, status
+
+from src.auth.deps import CurrentUserIdDep, SessionDep
+from src.social.schemas import MessageCreateSchema, MessageOutputSchema
+from src.social.service import SocialService
+
+router = APIRouter(prefix="/social", tags=["💬 Social"])
+
+
+# == SEND MESSAGE ==
+@router.post(
+    "/messages",
+    status_code=status.HTTP_201_CREATED,
+    response_model=MessageOutputSchema,
+    description="Send Message",
+)
+async def send_message(payload: MessageCreateSchema, user_id: CurrentUserIdDep, session: SessionDep):
+    service = SocialService(session=session)
+    try:
+        return await service.send_message(
+            sender_id=user_id,
+            receiver_id=payload.receiver_id,
+            content=payload.content,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error") from e
+
+
+# == GET HISTORY ==
+@router.get(
+    "/messages/{peer_id}",
+    status_code=status.HTTP_200_OK,
+    response_model=list[MessageOutputSchema],
+    description="Get Dialog History",
+)
+async def get_history(
+    peer_id: uuid.UUID,
+    user_id: CurrentUserIdDep,
+    session: SessionDep,
+    limit: int = Query(default=50, ge=1, le=200),
+    before_id: uuid.UUID | None = Query(default=None),
+):
+    service = SocialService(session=session)
+    try:
+        return await service.get_history(
+            user_id=user_id,
+            peer_id=peer_id,
+            limit=limit,
+            before_id=before_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error") from e
+
+=== src/social/schemas.py ===
+import uuid
+from datetime import datetime
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+# ═══════════════════════════════════════════════════════════════
+# HTTP-схемы (для ручек /api/v1/social/messages)
+# ═══════════════════════════════════════════════════════════════
+
+
+class MessageCreateSchema(BaseModel):
+    """Отправка сообщения через HTTP (альтернатива WebSocket, удобно для тестов через Swagger)."""
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    receiver_id: uuid.UUID
+    content: Annotated[str, Field(min_length=1, max_length=2000)]
+
+
+class MessageOutputSchema(BaseModel):
+    """Сообщение в ответе API."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    sender_id: uuid.UUID
+    receiver_id: uuid.UUID
+    content: str
+    is_read: bool
+    read_at: datetime | None
+    created_at: datetime
+
+
+# ═══════════════════════════════════════════════════════════════
+# WebSocket-схемы: клиент → сервер (входящие события)
+# ═══════════════════════════════════════════════════════════════
+
+
+class WSMessageIn(BaseModel):
+    """Клиент → сервер: отправить сообщение получателю."""
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    type: Literal["message"]
+    receiver_id: uuid.UUID
+    content: Annotated[str, Field(min_length=1, max_length=2000)]
+
+
+class WSHistoryIn(BaseModel):
+    """Клиент → сервер: запросить историю переписки с пользователем."""
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    type: Literal["history"]
+    peer_id: uuid.UUID
+    limit: Annotated[int, Field(ge=1, le=200)] = 50
+    # курсорная пагинация: получить сообщения «до» указанного id
+    # (UUIDv7 растёт со временем — сортировка по id = сортировка по времени)
+    before_id: uuid.UUID | None = None
+
+
+class WSMarkReadIn(BaseModel):
+    """Клиент → сервер: пометить сообщения прочитанными."""
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    type: Literal["mark_read"]
+    message_ids: Annotated[list[uuid.UUID], Field(min_length=1)]
+
+
+# ═══════════════════════════════════════════════════════════════
+# WebSocket-схемы: сервер → клиент (исходящие события)
+# ═══════════════════════════════════════════════════════════════
+
+
+class WSNewMessageOut(BaseModel):
+    """Сервер → клиент: пришло новое сообщение."""
+    type: Literal["new_message"] = "new_message"
+
+    message: MessageOutputSchema
+
+
+class WSHistoryOut(BaseModel):
+    """Сервер → клиент: история сообщений с собеседником."""
+    type: Literal["history"] = "history"
+
+    peer_id: uuid.UUID
+    messages: list[MessageOutputSchema]
+
+
+class WSReadOut(BaseModel):
+    """Сервер → клиент: собеседник прочитал твои сообщения."""
+    type: Literal["read"] = "read"
+
+    by: uuid.UUID  # id того, кто прочитал
+    message_ids: list[uuid.UUID]
+
+
+class WSErrorOut(BaseModel):
+    """Сервер → клиент: ошибка обработки события."""
+    type: Literal["error"] = "error"
+
+    detail: str
+
+
+
+=== src/social/service.py ===
+import uuid
+
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.social.models import Message
+from src.social.repository import MessagesRepository
+
+
+class SocialService:
+    """Бизнес-логика чата между пользователями."""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+        self.repo = MessagesRepository(session=session)
+
+    async def send_message(
+        self,
+        sender_id: uuid.UUID,
+        receiver_id: uuid.UUID,
+        content: str,
+    ) -> Message:
+        """
+        Отправить сообщение.
+        Проверки: не сам себе, нет блокировки, получатель существует (через FK).
+        """
+        if sender_id == receiver_id:
+            raise ValueError("Нельзя отправить сообщение самому себе")
+
+        if await self.repo.is_blocked_between(sender_id, receiver_id):
+            raise ValueError("Невозможно отправить сообщение: пользователь недоступен")
+
+        try:
+            return await self.repo.create_message(
+                sender_id=sender_id,
+                receiver_id=receiver_id,
+                content=content,
+            )
+        except IntegrityError as exc:
+            if "receiver_id" in str(exc.orig):
+                raise ValueError("Пользователь не найден") from exc
+            raise
+
+    async def get_history(
+        self,
+        user_id: uuid.UUID,
+        peer_id: uuid.UUID,
+        limit: int = 50,
+        before_id: uuid.UUID | None = None,
+    ) -> list[Message]:
+        """История сообщений между двумя пользователями."""
+        if user_id == peer_id:
+            raise ValueError("Нельзя запросить переписку с самим собой")
+
+        return await self.repo.get_dialog(
+            user1_id=user_id,
+            user2_id=peer_id,
+            limit=limit,
+            before_id=before_id,
+        )
+
+    async def mark_as_read(
+        self,
+        message_ids: list[uuid.UUID],
+        reader_id: uuid.UUID,
+    ) -> list[Message]:
+        """Пометить сообщения прочитанными. Только полученные reader_id."""
+        return await self.repo.mark_messages_read(
+            message_ids=message_ids,
+            reader_id=reader_id,
+        )
+
+    async def get_unread(
+        self,
+        user_id: uuid.UUID,
+        from_user_id: uuid.UUID,
+    ) -> list[Message]:
+        """Непрочитанные сообщения от конкретного пользователя."""
+        return await self.repo.get_unread(
+            user_id=user_id,
+            from_user_id=from_user_id,
+        )
+
+=== src/social/ws.py ===
+import uuid
+
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from pydantic import ValidationError
+
+from database.db import async_session_factory
+from src.auth.security import decode_access_token
+from src.exceptions.auth_exceptions import InvalidTokenError
+from src.social.schemas import (
+    WSErrorOut,
+    WSHistoryIn,
+    WSHistoryOut,
+    WSMarkReadIn,
+    WSMessageIn,
+    WSNewMessageOut,
+    WSReadOut,
+)
+from src.social.service import SocialService
+
+router = APIRouter()
+
+
+class ConnectionManager:
+    """
+    Реестр активных WebSocket-соединений в памяти процесса.
+    user_id → множество сокетов (у юзера может быть несколько вкладок/устройств).
+    """
+
+    def __init__(self) -> None:
+        self.active: dict[uuid.UUID, set[WebSocket]] = {}
+
+    async def connect(self, user_id: uuid.UUID, websocket: WebSocket) -> None:
+        await websocket.accept()
+        self.active.setdefault(user_id, set()).add(websocket)
+
+    def disconnect(self, user_id: uuid.UUID, websocket: WebSocket) -> None:
+        sockets = self.active.get(user_id)
+        if not sockets:
+            return
+        sockets.discard(websocket)
+        if not sockets:
+            self.active.pop(user_id, None)
+
+    async def send_to_user(self, user_id: uuid.UUID, payload: dict) -> bool:
+        """
+        Отправить payload во все сокеты юзера.
+        True — если доставлено (юзер онлайн), False — если офлайн.
+        """
+        sockets = self.active.get(user_id)
+        if not sockets:
+            return False
+        # копия: сокет может отвалиться во время итерации
+        for websocket in list(sockets):
+            try:
+                await websocket.send_json(payload)
+            except Exception:
+                self.disconnect(user_id, websocket)
+        return True
+
+
+manager = ConnectionManager()
+
+
+@router.websocket("/ws/chat")
+async def chat_websocket(websocket: WebSocket) -> None:
+    """
+    WebSocket endpoint для чата.
+    Аутентификация — JWT в query-параметре: /ws/chat?token=<JWT>.
+    """
+    # == АУТЕНТИФИКАЦИЯ ==
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.close(code=1008, reason="Токен не передан")
+        return
+
+    try:
+        user_id = decode_access_token(token)
+    except InvalidTokenError as exc:
+        await websocket.close(code=1008, reason=str(exc))
+        return
+
+    # == РЕГИСТРАЦИЯ В МЕНЕДЖЕРЕ ==
+    await manager.connect(user_id, websocket)
+
+    try:
+        # == ЦИКЛ ОБРАБОТКИ СОБЫТИЙ ==
+     while True:
+         try:
+             raw = await websocket.receive_json()
+             if not isinstance(raw, dict):
+                 raise ValueError
+             await _handle_event(user_id, raw, websocket)
+         except WebSocketDisconnect:
+             raise
+         except Exception:
+             await websocket.send_json(WSErrorOut(detail="Некорректное событие").model_dump())
+    except WebSocketDisconnect:
+        pass
+    finally:
+        manager.disconnect(user_id, websocket)
+
+
+async def _handle_event(user_id: uuid.UUID, raw: dict, websocket: WebSocket) -> None:
+    """Роутинг события по полю `type`."""
+    event_type = raw.get("type")
+
+    if event_type == "message":
+        await _handle_message(user_id, raw, websocket)
+    elif event_type == "history":
+        await _handle_history(user_id, raw, websocket)
+    elif event_type == "mark_read":
+        await _handle_mark_read(user_id, raw, websocket)
+    else:
+        await websocket.send_json(WSErrorOut(detail=f"Неизвестный тип события: {event_type}").model_dump())
+
+
+async def _handle_message(user_id: uuid.UUID, raw: dict, websocket: WebSocket) -> None:
+    """Событие `message`: сохранить и запушить получателю."""
+    try:
+        payload = WSMessageIn.model_validate(raw)
+    except ValidationError as exc:
+        await websocket.send_json(WSErrorOut(detail=str(exc)).model_dump())
+        return
+
+    async with async_session_factory() as session:
+        service = SocialService(session=session)
+        try:
+            message = await service.send_message(
+                sender_id=user_id,
+                receiver_id=payload.receiver_id,
+                content=payload.content,
+            )
+        except ValueError as exc:
+            await websocket.send_json(WSErrorOut(detail=str(exc)).model_dump())
+            return
+
+    # пуш получателю, если онлайн
+    await manager.send_to_user(
+        payload.receiver_id,
+        WSNewMessageOut(message=message).model_dump(mode="json"),
+    )
+
+    # эхо отправителю — подтверждение, что сообщение сохранено
+    await websocket.send_json(WSNewMessageOut(message=message).model_dump(mode="json"))
+
+
+async def _handle_history(user_id: uuid.UUID, raw: dict, websocket: WebSocket) -> None:
+    """Событие `history`: отдать историю переписки с собеседником."""
+    try:
+        payload = WSHistoryIn.model_validate(raw)
+    except ValidationError as exc:
+        await websocket.send_json(WSErrorOut(detail=str(exc)).model_dump())
+        return
+
+    async with async_session_factory() as session:
+        service = SocialService(session=session)
+        try:
+            messages = await service.get_history(
+                user_id=user_id,
+                peer_id=payload.peer_id,
+                limit=payload.limit,
+                before_id=payload.before_id,
+            )
+        except ValueError as exc:
+            await websocket.send_json(WSErrorOut(detail=str(exc)).model_dump())
+            return
+
+    await websocket.send_json(WSHistoryOut(peer_id=payload.peer_id, messages=messages).model_dump(mode="json"))
+
+
+async def _handle_mark_read(user_id: uuid.UUID, raw: dict, websocket: WebSocket) -> None:
+    """Событие `mark_read`: пометить сообщения прочитанными и уведомить отправителей."""
+    try:
+        payload = WSMarkReadIn.model_validate(raw)
+    except ValidationError as exc:
+        await websocket.send_json(WSErrorOut(detail=str(exc)).model_dump())
+        return
+
+    async with async_session_factory() as session:
+        service = SocialService(session=session)
+        updated = await service.mark_as_read(
+            message_ids=payload.message_ids,
+            reader_id=user_id,
+        )
+
+    if not updated:
+        return
+
+    # уведомить каждого отправителя: его сообщения прочитаны
+    message_ids_by_sender: dict[uuid.UUID, list[uuid.UUID]] = {}
+    for message in updated:
+        message_ids_by_sender.setdefault(message.sender_id, []).append(message.id)
+
+    for sender_id, message_ids in message_ids_by_sender.items():
+        await manager.send_to_user(
+            sender_id,
+            WSReadOut(by=user_id, message_ids=message_ids).model_dump(mode="json"),
+        )
+
+
+# == ПОДКЛЮЧЕНИЕ В main.py ==
+# from src.social.ws import router as social_ws_router
+# app.include_router(social_ws_router)   # БЕЗ /api/v1 — WS обычно отдельно
+
+
+=== src/telegram/client.py ===
+import logging
+
+import httpx
+
+from core.config import get_telegram_settings
+
+logger = logging.getLogger(__name__)
+
+TELEGRAM_API_BASE = "https://api.telegram.org"
+
+
+def _api_url(method: str) -> str:
+    """Собирает URL метода Telegram Bot API."""
+    token = get_telegram_settings().bot_token
+    return f"{TELEGRAM_API_BASE}/bot{token}/{method}"
+
+
+async def send_message(chat_id: int, text: str) -> bool:
+    """
+    Отправляет текстовое сообщение в Telegram.
+    Возвращает True, если доставлено, False — иначе.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                _api_url("sendMessage"),
+                json={"chat_id": chat_id, "text": text},
+            )
+            data = response.json()
+            if not data.get("ok"):
+                logger.warning("Telegram sendMessage не сработал: %s", data)
+                return False
+            return True
+    except httpx.HTTPError as exc:
+        logger.error("Telegram sendMessage: ошибка HTTP: %s", exc)
+        return False
+
+
+async def set_webhook(url: str) -> bool:
+    """
+    Регистрирует webhook в Telegram.
+    Вызывается один раз при старте приложения (если url задан).
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                _api_url("setWebhook"),
+                json={"url": url},
+            )
+            data = response.json()
+            if not data.get("ok"):
+                logger.warning("Telegram setWebhook не сработал: %s", data)
+                return False
+            logger.info("Telegram webhook зарегистрирован: %s", url)
+            return True
+    except httpx.HTTPError as exc:
+        logger.error("Telegram setWebhook: ошибка HTTP: %s", exc)
+        return False
+
+
+async def get_me() -> dict | None:
+    """
+    Проверка, что токен рабочий. Возвращает данные бота.
+    Полезно для отладки.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(_api_url("getMe"))
+            data = response.json()
+            if not data.get("ok"):
+                logger.warning("Telegram getMe не сработал: %s", data)
+                return None
+            return data.get("result")
+    except httpx.HTTPError as exc:
+        logger.error("Telegram getMe: ошибка HTTP: %s", exc)
+        return None
+
+=== src/telegram/handlers.py ===
+import logging
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.telegram import client
+from src.telegram.schemas import TelegramWebhookSchema
+from src.telegram.service import TelegramService
+
+logger = logging.getLogger(__name__)
+
+
+async def handle_update(update_data: dict, session: AsyncSession) -> None:
+    try:
+        update = TelegramWebhookSchema.model_validate(update_data)
+    except Exception as exc:
+        logger.warning("Не удалось распарсить апдейт Telegram: %s", exc)
+        return
+
+    try:
+        message = update.message
+        if message is None:
+            return
+        text = message.text
+        if text is None:
+            return
+        chat_id = message.chat.id
+        if text.startswith("/start"):
+            await _handle_start(text=text, chat_id=chat_id, session=session)
+        else:
+            logger.info("Неизвестная команда от chat_id=%s: %s", chat_id, text)
+    except Exception:
+        logger.exception("ОШИБКА обработки апдейта Telegram")
+
+
+async def _handle_start(text: str, chat_id: int, session: AsyncSession) -> None:
+    parts = text.split(maxsplit=1)
+
+    if len(parts) == 1:
+        await client.send_message(
+            chat_id=chat_id,
+            text=(
+                "👋 Привет! Я бот-помощник для трекинга привычек.\n\n"
+                "Чтобы привязать аккаунт — перейди по ссылке из веб-приложения "
+                "(кнопка «Привязать Telegram»)."
+            ),
+        )
+        return
+
+    code = parts[1].strip()
+    if not code:
+        await client.send_message(chat_id=chat_id, text="❌ Пустой код привязки")
+        return
+
+    service = TelegramService(session=session)
+    try:
+        await service.verify_start_code(code=code, chat_id=chat_id)
+    except ValueError as exc:
+        logger.info("Привязка отклонена для chat_id=%s: %s", chat_id, exc)
+        await client.send_message(chat_id=chat_id, text=f"❌ {exc}")
+        return
+    except Exception:
+        logger.exception("НЕОЖИДАННАЯ ОШИБКА при привязке chat_id=%s", chat_id)
+        await client.send_message(chat_id=chat_id, text="❌ Внутренняя ошибка")
+        return
+
+    await client.send_message(
+        chat_id=chat_id,
+        text="✅ Telegram привязан! Теперь ты будешь получать напоминания о привычках.",
+    )
+
+=== src/telegram/reminders.py ===
+import asyncio
+import logging
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+from sqlalchemy import func, select
+
+from database.db import async_session_factory
+from src.habits.models import Habit, HabitLog
+from src.telegram.service import TelegramService
+from src.users.models import User
+
+logger = logging.getLogger(__name__)
+
+CHECK_INTERVAL_SEC = 60
+WINDOW = timedelta(minutes=30)  
+
+
+def _due_slot(habit: Habit, tz: ZoneInfo, now_utc: datetime) -> datetime | None:
+    now_local = now_utc.astimezone(tz)
+    due = []
+    for t in habit.notification_times:
+        slot = datetime.combine(now_local.date(), t, tzinfo=tz)
+        if (
+            slot <= now_local
+            and now_local - slot <= WINDOW
+            and slot >= habit.created_at  # слот до создания привычки (не напоминаем)
+            and (habit.last_reminded_at is None or habit.last_reminded_at < slot)
+        ):
+            due.append(slot)
+    return max(due) if due else None
+
+
+async def _tick() -> None:
+    now_utc = datetime.now(timezone.utc)
+    async with async_session_factory() as session:
+        rows = (
+            await session.execute(
+                select(Habit, User.timezone, User.telegram_chat_id)
+                .join(User, User.id == Habit.creator_id)
+                .where(
+                    User.telegram_chat_id.is_not(None),
+                    User.email.not_like("%@seed.test"), 
+                    func.cardinality(Habit.notification_times) > 0,
+                )
+            )
+        ).all()
+
+        service = TelegramService(session=session)
+        for habit, tz_name, chat_id in rows:
+            try:
+                tz = ZoneInfo(tz_name or "UTC")
+            except Exception:
+                tz = ZoneInfo("UTC")
+
+            slot = _due_slot(habit, tz, now_utc)
+            if slot is None:
+                continue
+
+            done = await session.scalar(
+                select(HabitLog.id)
+                .where(
+                    HabitLog.habit_id == habit.id,
+                    HabitLog.user_id == habit.creator_id,
+                    HabitLog.completed_date == slot.date(),
+                )
+                .limit(1)
+            )
+            if done:
+                continue
+
+            if await service.send_reminder(chat_id=chat_id, habit_title=habit.title):
+                habit.last_reminded_at = now_utc
+
+        await session.commit()
+
+
+async def reminders_loop() -> None:
+    while True:
+        try:
+            await _tick()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Ошибка в цикле напоминаний")
+        await asyncio.sleep(CHECK_INTERVAL_SEC)
+
+=== src/telegram/router.py ===
+import logging
+
+from fastapi import APIRouter, HTTPException, Request, status
+
+from src.auth.deps import CurrentUserDep, SessionDep
+from src.telegram.handlers import handle_update
+from src.telegram.schemas import TelegramLinkOutputSchema
+from src.telegram.service import TelegramService
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/telegram", tags=["📱 Telegram"])
+
+
+# == GENERATE LINK ==
+@router.post(
+    "/link",
+    status_code=status.HTTP_200_OK,
+    response_model=TelegramLinkOutputSchema,
+    description="Generate Telegram link",
+)
+async def generate_telegram_link(user: CurrentUserDep, session: SessionDep):
+    """Генерирует одноразовую ссылку для привязки Telegram."""
+    service = TelegramService(session=session)
+    try:
+        url = await service.generate_link(user=user)
+    except Exception as e:
+        print(e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal Server Error",
+        )
+    return TelegramLinkOutputSchema(url=url)
+
+
+# == WEBHOOK ==
+@router.post(
+    "/webhook",
+    status_code=status.HTTP_200_OK,
+    description="Telegram webhook",
+)
+async def telegram_webhook(request: Request, session: SessionDep):
+    """
+    Принимает апдейты от Telegram.
+    Всегда отвечает 200, чтобы Telegram не ретраил.
+    """
+    try:
+        update_data = await request.json()
+    except Exception:
+        logger.warning("Webhook получил невалидный JSON")
+        return {"ok": True}
+
+    try:
+        await handle_update(update_data=update_data, session=session)
+    except Exception:
+        logger.exception("Ошибка обработки апдейта Telegram")
+
+    return {"ok": True}
+
+=== src/telegram/schemas.py ===
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class TelegramLinkOutputSchema(BaseModel):
+    url: str = Field(..., description="Ссылка вида https://t.me/<bot_name>?start=<code>")
+
+
+class TelegramChatSchema(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: int
+
+
+class TelegramUserSchema(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: int
+    is_bot: bool = False
+    username: str | None = None
+    first_name: str | None = None
+
+
+class TelegramMessageSchema(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    message_id: int
+    chat: TelegramChatSchema
+    from_: TelegramUserSchema | None = Field(default=None, alias="from")
+    text: str | None = None
+
+
+class TelegramWebhookSchema(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    update_id: int
+    message: TelegramMessageSchema | None = None
+
+=== src/telegram/service.py ===
+import hashlib
+import logging
+import secrets
+import uuid
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from core.config import get_telegram_settings
+from src.telegram import client
+from src.users.models import User
+from src.users.repository import UsersRepository
+
+logger = logging.getLogger(__name__)
+
+
+class TelegramService:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+        self.repo = UsersRepository(session=session)
+
+    async def generate_link(self, user: User) -> str:
+
+        settings = get_telegram_settings()
+        code = secrets.token_urlsafe(32)
+        code_hash = hashlib.sha256(code.encode()).hexdigest()
+
+        
+        expires_at = datetime.now(timezone.utc) + timedelta(
+            minutes=settings.link_ttl_minutes
+        )
+
+        
+        user.telegram_link_token_hash = code_hash
+        user.telegram_link_expires_at = expires_at
+        await self.session.commit()
+
+        url = f"https://t.me/{settings.bot_name}?start={code}"
+        logger.info("Сгенерирована ссылка привязки для юзера %s", user.id)
+        return url
+
+    async def verify_start_code(self, code: str, chat_id: int) -> None:
+
+        code_hash = hashlib.sha256(code.encode()).hexdigest()
+
+        
+        user = await self.repo.get_user_by_telegram_hash(token_hash=code_hash)
+        if user is None:
+            raise ValueError("Ссылка недействительна")
+
+        if user.telegram_link_expires_at is None or user.telegram_link_expires_at < datetime.now(timezone.utc):
+            raise ValueError("Ссылка устарела, сгенерируйте новую")
+
+        existing = await self.repo.get_user_by_telegram_chat_id(chat_id=chat_id)
+        if existing is not None and existing.id != user.id:
+            raise ValueError("Этот Telegram уже привязан к другому аккаунту")
+
+       
+        user.telegram_chat_id = chat_id
+        user.telegram_link_token_hash = None
+        user.telegram_link_expires_at = None
+
+        try:
+            await self.session.commit()
+        except IntegrityError as exc:
+            await self.session.rollback()
+            raise ValueError("Не удалось привязать Telegram, попробуйте позже") from exc
+
+        logger.info("Юзер %s привязал Telegram chat_id=%s", user.id, chat_id)
+
+    async def send_reminder(self, chat_id: int, habit_title: str) -> bool:
+        text = f"⏰ Напоминание: привычка «{habit_title}» ещё не выполнена"
+        ok = await client.send_message(chat_id=chat_id, text=text)
+        if not ok:
+            logger.warning(
+                "Не удалось отправить напоминание chat_id=%s habit=%s",
+                chat_id, habit_title,
+            )
+        return ok
+
+=== src/users/enums.py ===
+import enum
+
+
+class Theme(enum.StrEnum):
+    LIGHT = "light"
+    DARK = "dark"
+    SYSTEM = "system"
+
+
+
+class TimezoneEnum(enum.StrEnum):
+    # Универсальное время
+    UTC = "UTC"
+
+    # СНГ и Россия
+    EUROPE_MOSCOW = "Europe/Moscow"
+    EUROPE_SAMARA = "Europe/Samara"
+    EUROPE_KALININGRAD = "Europe/Kaliningrad"
+    ASIA_YEKATERINBURG = "Asia/Yekaterinburg"
+    ASIA_OMSK = "Asia/Omsk"
+    ASIA_NOVOSIBIRSK = "Asia/Novosibirsk"
+    ASIA_KRASNOYARSK = "Asia/Krasnoyarsk"
+    ASIA_IRKUTSK = "Asia/Irkutsk"
+    ASIA_YAKUTSK = "Asia/Yakutsk"
+    ASIA_VLADIVOSTOK = "Asia/Vladivostok"
+    ASIA_MAGADAN = "Asia/Magadan"
+    ASIA_KAMCHATKA = "Asia/Kamchatka"
+    
+    # Европа
+    EUROPE_LONDON = "Europe/London"
+    EUROPE_PARIS = "Europe/Paris"
+    EUROPE_BERLIN = "Europe/Berlin"
+    EUROPE_ROME = "Europe/Rome"
+    EUROPE_AMSTERDAM = "Europe/Amsterdam"
+    EUROPE_WARSAW = "Europe/Warsaw"
+    EUROPE_KIEV = "Europe/Kiev"
+    EUROPE_MINSK = "Europe/Minsk"
+    EUROPE_CHISINAU = "Europe/Chisinau"
+    EUROPE_ISTANBUL = "Europe/Istanbul"
+
+    # Азия и Ближний Восток
+    ASIA_ALMATY = "Asia/Almaty"
+    ASIA_TASHKENT = "Asia/Tashkent"
+    ASIA_BISHKEK = "Asia/Bishkek"
+    ASIA_DUSHANBE = "Asia/Dushanbe"
+    ASIA_EREVAN = "Asia/Yerevan"
+    ASIA_BAKU = "Asia/Baku"
+    ASIA_TBILISI = "Asia/Tbilisi"
+    ASIA_DUBAI = "Asia/Dubai"
+    ASIA_JERUSALEM = "Asia/Jerusalem"
+    ASIA_RIYADH = "Asia/Riyadh"
+    ASIA_TOKYO = "Asia/Tokyo"
+    ASIA_SHANGHAI = "Asia/Shanghai"
+    ASIA_SINGAPORE = "Asia/Singapore"
+    ASIA_SEOUL = "Asia/Seoul"
+    ASIA_KOLKATA = "Asia/Kolkata"
+
+    # Северная и Южная Америка
+    AMERICA_NEW_YORK = "America/New_York"
+    AMERICA_CHICAGO = "America/Chicago"
+    AMERICA_DENVER = "America/Denver"
+    AMERICA_LOS_ANGELES = "America/Los_Angeles"
+    AMERICA_ANCHORAGE = "America/Anchorage"
+    AMERICA_HONOLULU = "Pacific/Honolulu"
+    AMERICA_MEXICO_CITY = "America/Mexico_City"
+    AMERICA_SAO_PAULO = "America/Sao_Paulo"
+    AMERICA_ARGENTINA = "America/Argentina/Buenos_Aires"
+
+    # Австралия и Океания
+    AUSTRALIA_SYDNEY = "Australia/Sydney"
+    AUSTRALIA_MELBOURNE = "Australia/Melbourne"
+    AUSTRALIA_PERTH = "Australia/Perth"
+    PACIFIC_AUCKLAND = "Pacific/Auckland"
+
+    # Африка
+    AFRICA_CAIRO = "Africa/Cairo"
+    AFRICA_JOHANNESBURG = "Africa/Johannesburg"
+    AFRICA_NAIROBI = "Africa/Nairobi"
+
+=== src/users/models.py ===
+import uuid
+from datetime import datetime
+from typing import TYPE_CHECKING
+
+from sqlalchemy import BigInteger, DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from database.db import Base
+from database.enum import str_enum
+from database.mixins import TimeStampMixin, Uuid7PkMixin
+from src.users.enums import Theme, TimezoneEnum
+
+if TYPE_CHECKING:
+    from src.achievements.models import Achievement
+    from src.habits.models import Habit, HabitLog, SharedHabitUser
+    from src.social.models import Message, UserRelation
+
+
+class User(Uuid7PkMixin, TimeStampMixin, Base):
+    __tablename__ = "users"
+
+    username: Mapped[str] = mapped_column(String(16), unique=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    pfp_url: Mapped[str | None] = mapped_column(default=None)
+    # Настройки (вместо отдельной таблицы users_settings)
+    theme: Mapped[Theme] = mapped_column(str_enum(Theme), default=Theme.SYSTEM, server_default=Theme.SYSTEM.value)
+
+    #todo: добавить позже:
+    # timezone: Mapped[TimezoneEnum] = mapped_column(server_default=TimezoneEnum.UTC)
+    timezone: Mapped[str] = mapped_column(String(64), server_default="UTC")
+
+    # Telegram. chat_id у Telegram числовой и может быть больше int32.
+    telegram_chat_id: Mapped[int | None] = mapped_column(BigInteger, unique=True)
+    # Одноразовая ссылка привязки t.me/<bot>?start=<token>. В БД только хеш токена.
+    telegram_link_token_hash: Mapped[str | None] = mapped_column(String(64), unique=True)
+    telegram_link_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    habits: Mapped[list["Habit"]] = relationship(back_populates="creator")
+    habit_logs: Mapped[list["HabitLog"]] = relationship(back_populates="user")
+    achievements: Mapped[list["UserAchievement"]] = relationship(back_populates="user")
+    shared_habit_users: Mapped[list["SharedHabitUser"]] = relationship(back_populates="user")
+    sent_relations: Mapped[list["UserRelation"]] = relationship(
+        back_populates="user",
+        foreign_keys="UserRelation.user_id",
+    )
+
+    received_relations: Mapped[list["UserRelation"]] = relationship(
+        back_populates="target",
+        foreign_keys="UserRelation.target_id",
+    )
+
+    sent_messages: Mapped[list["Message"]] = relationship(
+        back_populates="sender",
+        foreign_keys="Message.sender_id",
+    )
+
+    received_messages: Mapped[list["Message"]] = relationship(
+        back_populates="receiver",
+        foreign_keys="Message.receiver_id",
+    )
+    refresh_tokens: Mapped[list["RefreshToken"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+
+
+class UserAchievement(Uuid7PkMixin, TimeStampMixin, Base):
+    """Достижение уровня пользователя, не привязано к конкретной привычке."""
+
+    __tablename__ = "user_achievements"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    achievement_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("achievements.id", ondelete="CASCADE"))
+
+    user: Mapped["User"] = relationship(back_populates="achievements")
+    achievement: Mapped["Achievement"] = relationship()
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "achievement_id", name="(uq_user_id_achievement_id) "
+        ),  # индекс по user_id получается бесплатно
+    )
+
+
+class RefreshToken(Uuid7PkMixin, TimeStampMixin, Base):
+    """Refresh-токен. Opaque-строка, хранится в БД, отзывается через logout."""
+
+    __tablename__ = "refresh_tokens"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    user: Mapped["User"] = relationship(back_populates="refresh_tokens")
+
+=== src/users/pfp/minio.py ===
+import logging
+import uuid
+
+import aioboto3
+import botocore
+from botocore.exceptions import BotoCoreError, ClientError
+from uuid6 import uuid7
+
+from core.config import get_minio_settings
+
+logger = logging.getLogger(__name__)
+
+# ClientError — хранилище ответило отказом, BotoCoreError — до него не достучались.
+STORAGE_ERRORS = (ClientError, BotoCoreError)
+NOT_FOUND_CODE = "404"
+
+MINIO_ENDPOINT = get_minio_settings().endpoint
+BUCKET_NAME = get_minio_settings().bucket_name
+ACCESS_KEY = get_minio_settings().root_user
+SECRET_KEY = get_minio_settings().root_password
+
+PUBLIC_PREFIX = f"{MINIO_ENDPOINT}/{BUCKET_NAME}/"
+DEFAULT_PFP_URL = f"{PUBLIC_PREFIX}defaults/default-pfp.webp"
+ACHIEVEMENTS_PREFIX = f"{MINIO_ENDPOINT}/achievements/"
+
+
+class MinioService:
+    def __init__(self):
+        self.session = aioboto3.Session(
+            aws_access_key_id=ACCESS_KEY,
+            aws_secret_access_key=SECRET_KEY,
+            region_name="us-east-1",
+        )
+        self.endpoint_url = MINIO_ENDPOINT
+        self.bucket_name = BUCKET_NAME
+
+    def _get_client(self):
+        config = botocore.client.Config(signature_version="s3v4")
+        return self.session.client("s3", endpoint_url=self.endpoint_url, config=config)
+
+    async def generate_presigned_upload_url(self, user_id: uuid.UUID, extension: str = "webp") -> dict[str, str]:
+        file_key = f"pfp/{user_id}/{uuid7().hex}.{extension}"
+
+        # Ссылка подписывается локально, без запроса в хранилище, поэтому ошибки здесь
+        # не ловим: если она случилась, это неверная настройка, и её должно быть видно.
+        async with self._get_client() as s3_client:
+            presigned_url = await s3_client.generate_presigned_url(
+                ClientMethod="put_object",
+                Params={"Bucket": self.bucket_name, "Key": file_key, "ContentType": f"image/{extension}"},
+                ExpiresIn=get_minio_settings().ttl_link_sec,
+            )
+        public_url = f"{PUBLIC_PREFIX}{file_key}"
+        return {"upload_url": presigned_url, "file_key": file_key, "public_url": public_url}
+
+    async def find_object_size(self, file_key: str) -> int | None:
+        """Размер загруженного файла в байтах или None, если по ключу ничего не лежит."""
+        async with self._get_client() as s3_client:
+            try:
+                response = await s3_client.head_object(Bucket=self.bucket_name, Key=file_key)
+            except ClientError as exc:
+                if exc.response["Error"]["Code"] == NOT_FOUND_CODE:
+                    return None
+                raise
+        return response["ContentLength"]
+
+    async def delete_avatar(self, file_key: str) -> bool:
+        """Не бросает: вызывается после записи в БД, и сбой хранилища не должен ронять запрос."""
+        try:
+            async with self._get_client() as s3_client:
+                await s3_client.delete_object(Bucket=self.bucket_name, Key=file_key)
+        except STORAGE_ERRORS:
+            logger.exception("pfp: не удалось удалить файл %s", file_key)
+            return False
+        return True
+
+
+minio_service = MinioService()
+
+=== src/users/pfp/router.py ===
+from fastapi import APIRouter, HTTPException, status
+from src.auth.deps import CurrentUserDep, CurrentUserIdDep, SessionDep
+from src.users.pfp.minio import PUBLIC_PREFIX, minio_service
+from src.users.pfp.schemas import ExtensionSchema, PfpUpdateRequest, UploadUrlResponse
+
+router = APIRouter(prefix="/users/me/pfp", tags=["🖼 User Profile Picture"])
+
+MAX_PFP_SIZE_BYTES = 5 * 1024 * 1024
+
+
+# == GET PRESIGNED URL ==
+@router.post("/upload-url", response_model=UploadUrlResponse)
+async def get_pfp_upload_url(extension_dto: ExtensionSchema, user_id: CurrentUserIdDep):
+    return await minio_service.generate_presigned_upload_url(user_id, extension_dto.extension)
+
+
+# == SAVE PFP IN DB ==
+@router.put("")
+async def update_pfp(data: PfpUpdateRequest, user: CurrentUserDep, session: SessionDep):
+    if not data.file_key.startswith(f"pfp/{user.id}/"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Чужой файл")
+
+    new_url = f"{PUBLIC_PREFIX}{data.file_key}"
+    old_url = user.pfp_url
+
+    if old_url == new_url:
+        return {"pfp_url": new_url}
+
+    # Клиент мог получить ссылку и ничего не загрузить — без проверки в профиль
+    # попала бы ссылка на несуществующий файл.
+    size = await minio_service.find_object_size(data.file_key)
+    if size is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Файл не загружен")
+    if size > MAX_PFP_SIZE_BYTES:
+        # Presigned PUT не умеет ограничивать размер, поэтому проверяем после загрузки.
+        await minio_service.delete_avatar(data.file_key)
+        raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="Файл больше 5 МБ")
+
+    user.pfp_url = new_url
+    await session.commit()
+
+    old_key = old_url.removeprefix(PUBLIC_PREFIX) if old_url else None
+    if old_key and old_key.startswith("pfp/"):
+        await minio_service.delete_avatar(old_key)
+
+    return {"pfp_url": new_url}
+
+
+# == DELETE PFP ==
+@router.delete("", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_pfp(user: CurrentUserDep, session: SessionDep) -> None:
+    old_url = user.pfp_url
+    if old_url is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Фото профиля не установлено")
+
+    # Сначала БД, потом файл: при сбое между шагами останется лишний файл,
+    # а не профиль со ссылкой на удалённый.
+    user.pfp_url = None
+    await session.commit()
+
+    old_key = old_url.removeprefix(PUBLIC_PREFIX)
+    if old_key.startswith("pfp/"):
+        await minio_service.delete_avatar(old_key)
+
+=== src/users/pfp/schemas.py ===
+import re
+from typing import Literal
+
+from pydantic import BaseModel, field_validator
+
+FILE_KEY_RE = re.compile(r"pfp/[0-9a-f\-]{36}/[0-9a-f]{32}\.(png|webp|jpeg)")
+
+
+class UploadUrlResponse(BaseModel):
+    upload_url: str
+    file_key: str
+    public_url: str
+
+
+class ExtensionSchema(BaseModel):
+    extension: Literal["png", "webp", "jpeg"] = "webp"
+
+
+class PfpUpdateRequest(BaseModel):
+    file_key: str
+
+    @field_validator("file_key")
+    @classmethod
+    def check_file_key(cls, v: str) -> str:
+        if not FILE_KEY_RE.fullmatch(v):
+            raise ValueError("Неверный file_key")
+        return v
+
+=== src/users/repository.py ===
+import uuid
+from datetime import UTC, datetime
+
+from sqlalchemy import delete, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+from sqlalchemy import and_, delete, or_, select, update
+from src.social.enums import RelationStatus
+from src.social.models import UserRelation
+from src.users.models import RefreshToken, User, UserAchievement
+
+
+class UsersRepository:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def _commit(self):
+        await self.session.commit()
+
+    async def _rollback(self):
+        await self.session.rollback()
+
+    async def create_user(self, username: str, password_hash: str, email: str) -> User:
+        new_user = User(username=username, password_hash=password_hash, email=email, achievements=[])
+        self.session.add(new_user)
+        await self.session.commit()
+        return new_user
+
+    async def get_user_by_id(self, user_id: uuid.UUID) -> User | None:
+        stmt = (
+            select(User)
+            .where(User.id == user_id)
+            .options(selectinload(User.achievements).joinedload(UserAchievement.achievement))
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_user_by_username(self, username: str) -> User | None:
+        stmt = (
+            select(User)
+            .where(User.username == username)
+            .options(selectinload(User.achievements).joinedload(UserAchievement.achievement))
+        )
+
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_user_by_telegram_hash(self, token_hash: str) -> User | None:
+        stmt = select(User).where(User.telegram_link_token_hash == token_hash)
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_user_by_telegram_chat_id(self, chat_id: int) -> User | None:
+        stmt = select(User).where(User.telegram_chat_id == chat_id)
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def delete_user(self, user_id: uuid.UUID) -> bool:
+        stmt = delete(User).where(User.id == user_id)
+        result = await self.session.execute(stmt)
+        await self.session.commit()
+        return result.rowcount > 0
+
+    async def create_refresh_token(
+        self,
+        user_id: uuid.UUID,
+        token_hash: str,
+        expires_at: datetime,
+    ) -> RefreshToken:
+        new_token = RefreshToken(
+            user_id=user_id,
+            token_hash=token_hash,
+            expires_at=expires_at,
+        )
+        self.session.add(new_token)
+        await self.session.commit()
+        return new_token
+
+    async def get_refresh_token_by_hash(self, token_hash: str) -> RefreshToken | None:
+        stmt = select(RefreshToken).where(RefreshToken.token_hash == token_hash)
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def revoke_refresh_token(self, token_id: uuid.UUID) -> None:
+        stmt = update(RefreshToken).where(RefreshToken.id == token_id).values(revoked_at=datetime.now(UTC))
+        await self.session.execute(stmt)
+        await self.session.commit()
+
+    async def revoke_all_user_refresh_tokens(self, user_id: uuid.UUID) -> None:
+        """Отозвать все refresh юзера — при подозрении на кражу или logout."""
+        stmt = (
+            update(RefreshToken)
+            .where(
+                RefreshToken.user_id == user_id,
+                RefreshToken.revoked_at.is_(None),
+            )
+            .values(revoked_at=datetime.now(UTC))
+        )
+        await self.session.execute(stmt)
+        await self.session.commit()
+
+    async def edit_profile(
+        self,
+        user_id: uuid.UUID,
+        user_data_dict: dict,
+    ):
+        stmt = (
+            update(User)
+            .where(User.id == user_id)
+            .values(**user_data_dict)
+            .returning(User)
+            
+        )
+        result = await self.session.execute(stmt)
+        await self._commit()
+        return result.scalar_one_or_none()
+
+    async def search_users(self, query: str, exclude_user_id: uuid.UUID, limit: int) -> list[User]:
+        # экранирование
+        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        blocked = select(UserRelation.id).where(
+            UserRelation.status == RelationStatus.BLOCKED,
+            or_(
+                and_(UserRelation.user_id == exclude_user_id, UserRelation.target_id == User.id),
+                and_(UserRelation.target_id == exclude_user_id, UserRelation.user_id == User.id),
+            ),
+        )
+        stmt = (
+            select(User)
+            .where(
+                User.id != exclude_user_id,
+                User.username.ilike(f"%{escaped}%", escape="\\"),
+                ~blocked.exists(),
+            )
+            .order_by(User.username)
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+=== src/users/router.py ===
+from fastapi import APIRouter, HTTPException, status, Query
+
+from src.auth.deps import CurrentUserDep, CurrentUserIdDep, SessionDep
+from src.users.schemas import (
+    AuthOutputSchema,
+    RefreshTokenSchema,
+    UserCreateSchema,
+    UserLoginSchema,
+    UserOutputSchema,
+    UserPasswordUpdateSchema,
+    UserUpdateSchema,
+    UserSearchSchema
+)
+from src.users.service import UsersService
+from src.exceptions.user_exceptions import UsernameTakenError, IncorrectPassword, AuthError, UserNotFoundError, DataFormatError
+
+router = APIRouter(prefix="/users", tags=["👤 Users"])
+
+
+# == SIGN UP ==
+@router.post("/sign-up", status_code=status.HTTP_201_CREATED, response_model=AuthOutputSchema, description="Sign-Up")
+async def sign_up(user_data: UserCreateSchema, session: SessionDep):
+    service = UsersService(session=session)
+    try:
+        return await service.sign_up(user_data=user_data)
+    except UsernameTakenError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
+
+
+# == LOGIN ==
+@router.post("/login", status_code=status.HTTP_200_OK, response_model=AuthOutputSchema, description="Login")
+async def login(user_data: UserLoginSchema, session: SessionDep):
+    service = UsersService(session=session)
+    try:
+        return await service.login(user_data=user_data)
+    except IncorrectPassword as e:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
+
+
+# == LOG OUT ==
+@router.post(
+    "/logout",
+    status_code=status.HTTP_204_NO_CONTENT,
+    description="Logout",
+)
+async def logout(user: CurrentUserDep, session: SessionDep):
+    """Отзывает все refresh-токены юзера. Access умрёт сам через exp."""
+    service = UsersService(session=session)
+    try:
+        await service.logout(user_id=user.id)
+    except Exception as e:
+        print(e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal Server Error",
+        )
+    return None
+
+
+# == REFRESH TOKEN ==
+@router.post(
+    "/refresh",
+    status_code=status.HTTP_200_OK,
+    response_model=AuthOutputSchema,
+    description="Refresh access token",
+)
+async def refresh(payload: RefreshTokenSchema, session: SessionDep):
+    service = UsersService(session=session)
+    try:
+        return await service.refresh(refresh_token_str=payload.refresh_token)
+    except AuthError as e:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
+    except UserNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        print(e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal Server Error",
+        )
+
+
+# == DELETE ACCOUNT ==
+@router.delete(
+    "/me",
+    status_code=status.HTTP_204_NO_CONTENT,
+    description="Delete my account",
+)
+async def delete_account(user: CurrentUserDep, session: SessionDep):
+    service = UsersService(session=session)
+    try:
+        await service.delete_account(user_id=user.id)
+    except UserNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        print(e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal Server Error",
+        )
+    return None
+
+
+# == GET ME ==
+@router.get("/me", status_code=status.HTTP_200_OK, response_model=UserOutputSchema, description="Get user's profile")
+async def get_me(current_user_id: CurrentUserIdDep, session: SessionDep):
+    service = UsersService(session=session)
+    try:
+        return await service.get_me(user_id=current_user_id)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal Server Error",
+        )
+    return None
+
+
+# == PATCH ME ==
+@router.patch("/me", status_code=status.HTTP_200_OK, response_model=UserOutputSchema, description="Edit user's profile")
+async def edit_profile(current_user: CurrentUserDep, session: SessionDep, user_data: UserUpdateSchema):
+    service = UsersService(session=session)
+    try:
+        return await service.edit_profile(user_id=current_user.id, user_data=user_data)
+    except DataFormatError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except UserNotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except UsernameTakenError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
+    except IncorrectPassword as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal Server Error",
+        )
+    return None
+
+
+# == UPDATE PASSWORD ==
+@router.patch(
+    "/password", status_code=status.HTTP_200_OK, response_model=AuthOutputSchema, description="Edit user's password"
+)
+async def change_password(
+    current_user_id: CurrentUserIdDep, session: SessionDep, new_password_dto: UserPasswordUpdateSchema
+):
+    service = UsersService(session=session)
+    try:
+        return await service.change_password(user_id=current_user_id, new_password_dto=new_password_dto)
+    except IncorrectPassword as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal Server Error",
+        )
+
+# == SEARCH USERS ==
+@router.get(
+    "/search",
+    status_code=status.HTTP_200_OK,
+    response_model=list[UserSearchSchema],
+    description="Search users by username",
+)
+async def search_users(
+    current_user_id: CurrentUserIdDep,
+    session: SessionDep,
+    username: str = Query(min_length=2, max_length=16),
+    limit: int = Query(default=20, ge=1, le=50),
+):
+    service = UsersService(session=session)
+    try:
+        return await service.search_users(current_user_id=current_user_id, query=username, limit=limit)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
+
+
+
+=== src/users/schemas.py ===
+import uuid
+from datetime import datetime
+from typing import Annotated, Any
+
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr, field_validator
+
+from src.achievements.schemas import AchievementOutputSchema
+from src.users.enums import Theme, TimezoneEnum
+from src.users.pfp.minio import DEFAULT_PFP_URL
+
+
+class UserCreateSchema(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    username: Annotated[str, Field(min_length=5, max_length=16, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")]
+    password: SecretStr
+    email: EmailStr
+
+    @field_validator("username")
+    @classmethod
+    def username_lowercase(cls, v: str) -> str:
+        return v.lower()
+
+
+class UserLoginSchema(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    username: Annotated[str, Field(min_length=5, max_length=16)]
+    password: SecretStr
+
+    @field_validator("username")
+    @classmethod
+    def username_lowercase(cls, v: str) -> str:
+        return v.lower()
+
+
+class UserUpdateSchema(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+    email: EmailStr | None = None
+    username: Annotated[str, Field(min_length=5, max_length=16, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_-]*$")] | None = None
+    timezone: TimezoneEnum | None = None
+    theme: Theme | None = None
+
+    @field_validator("username")
+    @classmethod
+    def username_lowercase(cls, v: str | None) -> str | None:
+        return v.lower() if v else None
+
+
+class UserPasswordUpdateSchema(BaseModel):
+    current_password: SecretStr
+    new_password: SecretStr
+
+
+class UserOutputSchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    created_at: datetime
+    username: str
+    email: EmailStr
+    theme: Theme
+    timezone: str
+    telegram_chat_id: int | None = None
+    pfp_url: str
+    achievements: list[AchievementOutputSchema] = []
+
+    @field_validator("pfp_url", mode="before")
+    @classmethod
+    def set_default_pfp(cls, v: str | None) -> str:
+        return v or DEFAULT_PFP_URL
+
+    @field_validator("achievements", mode="before")
+    @classmethod
+    def extract_achievements(cls, v: Any) -> list[Any]:
+        if not v:
+            return []
+        return [
+            item.achievement if hasattr(item, "achievement") else item
+            for item in v
+            if getattr(item, "achievement", item) is not None
+        ]
+
+class UserSearchSchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    username: str
+    pfp_url: str
+
+    @field_validator("pfp_url", mode="before")
+    @classmethod
+    def set_default_pfp(cls, v: str | None) -> str:
+        return v or DEFAULT_PFP_URL
+
+
+class TokenSchema(BaseModel):
+    access_token: str
+    token_type: str = "Bearer"
+    refresh_token: str
+
+
+class RefreshTokenSchema(BaseModel):
+    refresh_token: str
+
+
+class AuthOutputSchema(BaseModel):
+    user: UserOutputSchema
+    token: TokenSchema
+
+=== src/users/service.py ===
+import uuid
+from datetime import UTC, datetime, timedelta
+
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+from src.exceptions.user_exceptions import UsernameTakenError, IncorrectPassword, AuthError,  UserNotFoundError, DataFormatError
+
+from src.auth.hash_argon import DUMMY_HASH, create_password, verify_password
+from src.auth.security import (
+    REFRESH_TOKEN_EXPIRE_DAYS,
+    create_access_token,
+    create_refresh_token,
+    hash_refresh_token,
+)
+from src.users.models import User
+from src.users.repository import UsersRepository
+from src.users.schemas import (
+    AuthOutputSchema,
+    TokenSchema,
+    UserCreateSchema,
+    UserLoginSchema,
+    UserOutputSchema,
+    UserPasswordUpdateSchema,
+    UserUpdateSchema,
+    UserSearchSchema,
+)
+
+
+class UsersService:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+        self.repo = UsersRepository(session=session)
+
+    async def _issue_tokens(self, user: User) -> AuthOutputSchema:
+        """Выдаёт access + refresh, сохраняет refresh в БД."""
+        access_str = create_access_token(user_id=user.id)
+
+        refresh_str = create_refresh_token()
+        refresh_hash = hash_refresh_token(refresh_str)
+        expires_at = datetime.now(UTC) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+
+        await self.repo.create_refresh_token(
+            user_id=user.id,
+            token_hash=refresh_hash,
+            expires_at=expires_at,
+        )
+
+        return AuthOutputSchema(
+            user=UserOutputSchema.model_validate(user),
+            token=TokenSchema(access_token=access_str, refresh_token=refresh_str),
+        )
+
+    async def sign_up(self, user_data: UserCreateSchema):
+        password = user_data.password.get_secret_value()
+        password_hash = await create_password(password=password)
+        try:
+            new_user_dao = await self.repo.create_user(
+                username=user_data.username,
+                password_hash=password_hash,
+                email=user_data.email,
+            )
+        except IntegrityError as e:
+            if "username" in str(e.orig):
+                raise UsernameTakenError("Этот юзернейм занят")
+            if "email" in str(e.orig):
+                raise UsernameTakenError("Этот email уже зарегистрирован")
+            raise
+
+        return await self._issue_tokens(new_user_dao)
+
+    async def login(self, user_data: UserLoginSchema):
+        password = user_data.password.get_secret_value()
+        user_dao = await self.repo.get_user_by_username(username=user_data.username)
+        if not user_dao:
+            await verify_password(password=password, hashed_password=DUMMY_HASH)
+            raise IncorrectPassword("Неверный логин или пароль")
+        is_password_correct = await verify_password(password=password, hashed_password=user_dao.password_hash)
+        if not is_password_correct:
+            raise IncorrectPassword("Неверный логин или пароль")
+
+        return await self._issue_tokens(user_dao)
+
+    async def refresh(self, refresh_token_str: str) -> AuthOutputSchema:
+        """Обновляет access по refresh. Ротирует refresh."""
+        token_hash = hash_refresh_token(refresh_token_str)
+        token_dao = await self.repo.get_refresh_token_by_hash(token_hash=token_hash)
+
+        if not token_dao:
+            raise AuthError("Невалидный refresh-токен")
+
+        if token_dao.revoked_at is not None:
+            if datetime.now(UTC) - token_dao.revoked_at > timedelta(seconds=30):
+                await self.repo.revoke_all_user_refresh_tokens(user_id=token_dao.user_id)
+            raise AuthError("Refresh-токен отозван")
+
+        if token_dao.expires_at < datetime.now(UTC):
+            raise AuthError("Refresh-токен истёк")
+
+        user_dao = await self.repo.get_user_by_id(user_id=token_dao.user_id)
+        if not user_dao:
+            raise UserNotFoundError("Пользователь не найден")
+
+        # Ротация: старый отзываем, выдаём новую пару
+        await self.repo.revoke_refresh_token(token_id=token_dao.id)
+        return await self._issue_tokens(user_dao)
+
+    async def logout(self, user_id: uuid.UUID) -> None:
+        """Отзывает все refresh юзера. Access умрёт сам через exp."""
+        await self.repo.revoke_all_user_refresh_tokens(user_id=user_id)
+
+    async def delete_account(self, user_id: uuid.UUID) -> None:
+        deleted = await self.repo.delete_user(user_id=user_id)
+        if not deleted:
+            raise UserNotFoundError("Пользователь не найден")
+
+    async def get_me(self, user_id: uuid.UUID):
+        user_dao = await self.repo.get_user_by_id(user_id=user_id)
+        return UserOutputSchema.model_validate(user_dao)
+
+    async def edit_profile(self, user_id: uuid.UUID, user_data: UserUpdateSchema):
+        user_data_dict = user_data.model_dump(exclude_unset=True, exclude_none=True)
+        if not user_data_dict:
+            raise DataFormatError("Данные не могут быть пустые")
+        try:
+            updated_user = await self.repo.edit_profile(user_id=user_id, user_data_dict=user_data_dict)
+            if not updated_user:
+                raise UserNotFoundError("Не удалось внести изменения")
+            user = await self.repo.get_user_by_id(user_id=updated_user.id)
+            return UserOutputSchema.model_validate(user)
+
+        except IntegrityError as exc:
+            exc_text = str(exc.orig)
+            await self.repo._rollback()
+            if "username" in exc_text:
+                raise UsernameTakenError("Этот юзернейм занят")
+            if "email" in exc_text:
+                raise UsernameTakenError("Этот имейл уже кем-то используется")
+            if "timezone" in exc_text:
+                raise DataFormatError("Часовой пояс указан не верно")
+            if "theme" in exc_text:
+                raise DataFormatError("Оформление указано не верно")
+            else:
+                raise
+
+    async def change_password(self, user_id: uuid.UUID, new_password_dto: UserPasswordUpdateSchema):
+        current_password = new_password_dto.current_password.get_secret_value()
+        new_password = new_password_dto.new_password.get_secret_value()
+
+        new_password_hash = await create_password(password=new_password)
+
+        if not new_password_hash:
+            raise IncorrectPassword("Не удалось проверить пароли")
+
+        user_dao = await self.repo.get_user_by_id(user_id=user_id)
+        if not user_dao:
+            raise UserNotFoundError("Пользователь не найден")
+
+        is_password_correct = await verify_password(password=current_password, hashed_password=user_dao.password_hash)
+        if not is_password_correct:
+            raise IncorrectPassword("Текущий пароль не верный")
+
+        user_dao.password_hash = new_password_hash
+        await self.repo._commit()
+
+        return await self._issue_tokens(user_dao)
+
+    async def search_users(self, current_user_id: uuid.UUID, query: str, limit: int) -> list[UserSearchSchema]:
+        users = await self.repo.search_users(
+            query=query.strip().lower(), exclude_user_id=current_user_id, limit=limit
+        )
+        return [UserSearchSchema.model_validate(user) for user in users]

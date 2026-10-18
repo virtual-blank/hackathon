@@ -26,13 +26,10 @@ async def update_pfp(data: PfpUpdateRequest, user: CurrentUserDep, session: Sess
     if old_url == new_url:
         return {"pfp_url": new_url}
 
-    # Клиент мог получить ссылку и ничего не загрузить — без проверки в профиль
-    # попала бы ссылка на несуществующий файл.
     size = await minio_service.find_object_size(data.file_key)
     if size is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Файл не загружен")
     if size > MAX_PFP_SIZE_BYTES:
-        # Presigned PUT не умеет ограничивать размер, поэтому проверяем после загрузки.
         await minio_service.delete_avatar(data.file_key)
         raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="Файл больше 5 МБ")
 
@@ -53,8 +50,6 @@ async def delete_pfp(user: CurrentUserDep, session: SessionDep) -> None:
     if old_url is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Фото профиля не установлено")
 
-    # Сначала БД, потом файл: при сбое между шагами останется лишний файл,
-    # а не профиль со ссылкой на удалённый.
     user.pfp_url = None
     await session.commit()
 

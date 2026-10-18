@@ -32,7 +32,6 @@ class FriendsRepository:
         await self.session.delete(relation)
 
     async def get_friends(self, user_id: uuid.UUID, limit: int, offset: int) -> list[User]:
-        # Строка дружбы направленная, поэтому друг может стоять с любой её стороны.
         stmt = (
             select(User)
             .join(

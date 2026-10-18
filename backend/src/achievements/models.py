@@ -24,6 +24,6 @@ class Achievement(Uuid7PkMixin, TimeStampMixin, Base):
     rule_type: Mapped[str] = mapped_column(String(32), default="STREAK", server_default="STREAK")  # тип условия ачивки
     rule_value: Mapped[int] = mapped_column(Integer, default=0, server_default="0")  # количество для выполнения
     color_hex: Mapped[str] = mapped_column(String(7))  # backround glow color
-    requierement: Mapped[str] = mapped_column(String(255))  # описание условий выполнения (строгим текстом)
+    requirement: Mapped[str] = mapped_column(String(255))  # описание условий выполнения (строгим текстом)
     description: Mapped[str] = mapped_column(String(255))  # описание (для пользователя)
     icon_url: Mapped[str]  # иконка

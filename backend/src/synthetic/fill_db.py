@@ -18,16 +18,17 @@ USERS = {
 
 tasks = {}
 
+
 async def hash_users():
 
-  async with asyncio.TaskGroup() as tg:
-      for user_id, user_data in USERS.items():
-          task = tg.create_task(create_password, user_data.get("password"))
-          tasks[user_id] = task
-      for user_id, task in tasks.items():
-          result = task.result()
-          if result:
-              USERS[user_id]["password_hash"] = result
+    async with asyncio.TaskGroup() as tg:
+        for user_id, user_data in USERS.items():
+            task = tg.create_task(create_password, user_data.get("password"))
+            tasks[user_id] = task
+        for user_id, task in tasks.items():
+            result = task.result()
+            if result:
+                USERS[user_id]["password_hash"] = result
 
 
 # =====================================================================
@@ -444,7 +445,7 @@ WHERE hb.id = s.habit_id;
 -- уже существующие ачивки (совпало name) не трогаются.
 -- Иконки: имена файлов лежат в frontend/assets/achievements (см. ACH_ICON_FULL_URL в seed.py).
 INSERT INTO achievements (id, created_at, updated_at, name, rule_type, rule_value, color_hex,
-                          requierement, description, icon_url)
+                          requirement, description, icon_url)
 SELECT pg_temp.uuid7_at(now()), now(), now(), v.name, v.rule_type, v.rule_value, v.color_hex,
        v.req, v.descr, '{{ACH_ICON_BASE}}' || v.icon
 FROM (VALUES

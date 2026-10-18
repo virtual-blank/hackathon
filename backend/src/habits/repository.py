@@ -1,8 +1,8 @@
 import uuid
-from datetime import date, time
+from datetime import date, datetime, time
 from typing import Any
 
-from sqlalchemy import delete, select, update, exists
+from sqlalchemy import delete, exists, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,13 +38,30 @@ class HabitLogRepository:
             await self.session.flush()
         except IntegrityError as exc:
             await self.session.rollback()
-            raise ValueError(
-                f"Привычка {habit_id} уже отмечена выполненной на {completed_date}"
-            ) from exc
+            raise ValueError(f"Привычка {habit_id} уже отмечена выполненной на {completed_date}") from exc
 
         await self.session.commit()
         await self.session.refresh(log)
         return log
+
+    async def get_log_by_date(
+        self,
+        *,
+        user_id: uuid.UUID,
+        habit_id: uuid.UUID,
+        completed_date: date,
+    ) -> HabitLog | None:
+        stmt = select(HabitLog).where(
+            HabitLog.user_id == user_id,
+            HabitLog.habit_id == habit_id,
+            HabitLog.completed_date == completed_date,
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def delete_log_instance(self, log: HabitLog) -> None:
+        await self.session.delete(log)
+        await self.session.flush()
 
     async def get_logs_in_range(
         self,
@@ -128,34 +145,13 @@ class HabitLogRepository:
         result = await self.session.execute(stmt)
         return list(result.scalars().unique().all())
 
-
-    # async def delete_log(
-    #     self,
-    #     *,
-    #     user_id: uuid.UUID,
-    #     log_id: uuid.UUID,
-    # ) -> bool:
-    #     stmt = delete(HabitLog).where(
-    #         HabitLog.id == log_id,
-    #         HabitLog.user_id == user_id,
-    #     )
-    #     result = await self.session.execute(stmt)
-    #     await self.session.commit()
-    #     return result.rowcount > 0
-
-
-    # async def remove_completion(self, *, user_id: uuid.UUID, habit_id: uuid.UUID, completed_date: date) -> bool:
-    #     stmt = (
-    #         delete(HabitLog)
-    #         .where(
-    #             HabitLog.user_id == user_id,
-    #             HabitLog.habit_id == habit_id,
-    #             HabitLog.completed_date == completed_date,
-    #         )
-    #     )
-    #     result = await self.session.execute(stmt)
-    #     await self.session.commit()
-    #     return result.rowcount > 0
+    async def get_log_dates(self, *, user_id: uuid.UUID, habit_id: uuid.UUID) -> list[date]:
+        stmt = (
+            select(HabitLog.completed_date)
+            .where(HabitLog.user_id == user_id, HabitLog.habit_id == habit_id)
+            .order_by(HabitLog.completed_date.asc())
+        )
+        return list((await self.session.execute(stmt)).scalars().all())
 
     async def _user_can_log_habit(
         self,
@@ -207,14 +203,14 @@ class HabitsRepository:
         return result.scalar_one_or_none()
 
     async def get_all_habits(
-            self,
-            creator_id: uuid.UUID,
-            visibility: list[Visibility] | None = None,
-            limit: int = 50,
-            offset: int = 0,
-            start_date: date | None = None,
-            end_date: date | None = None,
-            status: str | None = None,
+        self,
+        creator_id: uuid.UUID,
+        visibility: list[Visibility] | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        status: str | None = None,
     ) -> list[Habit]:
 
         if start_date is not None and end_date is not None and start_date > end_date:
@@ -235,23 +231,15 @@ class HabitsRepository:
             )
 
             if start_date is not None:
-                log_exists = log_exists.where(
-                    HabitLog.completed_date >= start_date
-                )
+                log_exists = log_exists.where(HabitLog.completed_date >= start_date)
 
             if end_date is not None:
-                log_exists = log_exists.where(
-                    HabitLog.completed_date <= end_date
-                )
+                log_exists = log_exists.where(HabitLog.completed_date <= end_date)
 
             condition = ~exists(log_exists) if status == "uncompleted" else exists(log_exists)
             stmt = stmt.where(condition)
 
-        stmt = (
-            stmt.order_by(Habit.created_at.desc(), Habit.id)
-            .limit(limit)
-            .offset(offset)
-        )
+        stmt = stmt.order_by(Habit.created_at.desc(), Habit.id).limit(limit).offset(offset)
 
         result = await self.session.execute(stmt)
         return result.scalars().all()
@@ -287,5 +275,20 @@ class HabitsRepository:
         await self.session.commit()
         return result.scalar_one_or_none() is not None
 
-    async def mark_habit(self, habit_id: uuid.UUID, user_id: uuid.UUID):
-        stmt = update(Habit)
+    async def update_streak(
+        self,
+        habit_id: uuid.UUID,
+        creator_id: uuid.UUID,
+        current_streak_days: int,
+        max_streak_days: int,
+        streak_expires_at: datetime | None,
+    ) -> Habit | None:
+        return await self.update_habit(
+            habit_id=habit_id,
+            creator_id=creator_id,
+            updates={
+                "current_streak_days": current_streak_days,
+                "max_streak_days": max_streak_days,
+                "streak_expires_at": streak_expires_at,
+            },
+        )

@@ -31,8 +31,7 @@ async def create_habit(
     service = HabitsService(session=session)
     try:
         new_habit = await service.create_habit(habit_data=habit_data, user_id=user_id)
-        ach_service = AchievementsService(session=session)
-        bt.add_task(ach_service.check_total_habits_count_achievements, user_id=user_id)
+        bt.add_task(AchievementsService.process_achievements_habits_bt, user_id=user_id)
         return new_habit
     except ValueError as e:
         raise HTTPException(
@@ -55,14 +54,14 @@ async def create_habit(
     description="Get Habits",
 )
 async def get_habits(
-        user_id: CurrentUserIdDep,
-        session: SessionDep,
-        target_user_id: uuid.UUID | None = Query(default=None),
-        start_date: date | None = Query(default=None),
-        end_date: date | None = Query(default=None),
-        habit_status: Literal["completed", "uncompleted"] | None = Query(default=None, alias="status"),
-        limit: int = Query(default=50, ge=1, le=100),
-        offset: int = Query(default=0, ge=0),
+    user_id: CurrentUserIdDep,
+    session: SessionDep,
+    target_user_id: uuid.UUID | None = Query(default=None),
+    start_date: date | None = Query(default=None),
+    end_date: date | None = Query(default=None),
+    habit_status: Literal["completed", "uncompleted"] | None = Query(default=None, alias="status"),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
 ):
     service = HabitsService(session=session)
     try:
@@ -89,12 +88,13 @@ async def get_habits(
     description="Get habit logs",
 )
 async def get_logs_in_range(
-        user_id: CurrentUserIdDep,
-        date_from: date, date_to: date,
-        session: SessionDep,
-        habit_id: uuid.UUID | None = None,
-        limit : int = Query(default=50, ge=1, le=100),
-        offset: int = Query(default=0, ge=0),
+    user_id: CurrentUserIdDep,
+    date_from: date,
+    date_to: date,
+    session: SessionDep,
+    habit_id: uuid.UUID | None = None,
+    limit: int = Query(default=500, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
 ):
     service = HabitLogService(session=session)
     try:
@@ -222,16 +222,14 @@ async def mark_habit(current_user: CurrentUserDep, session: SessionDep, habit_id
     service = HabitsService(session=session)
     try:
         updated_habit = await service.mark_habit(habit_id=habit_id, current_user=current_user)
-        ach_service = AchievementsService(session=session)
-        bt.add_task(
-            ach_service.check_streak_achievements,
-            user_id=current_user.id,
-            streak_days=updated_habit.habit.current_streak_days,
-        )
+        if updated_habit.is_completed:
+            bt.add_task(
+                AchievementsService.process_achievements_task_bt,
+                user_id=current_user.id,
+                streak_days=updated_habit.habit.current_streak_days,
+            )
         return updated_habit
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-    except HTTPException:
-        raise
     except Exception:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")

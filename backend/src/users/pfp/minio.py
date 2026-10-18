@@ -10,7 +10,6 @@ from core.config import get_minio_settings
 
 logger = logging.getLogger(__name__)
 
-# ClientError — хранилище ответило отказом, BotoCoreError — до него не достучались.
 STORAGE_ERRORS = (ClientError, BotoCoreError)
 NOT_FOUND_CODE = "404"
 
@@ -41,8 +40,6 @@ class MinioService:
     async def generate_presigned_upload_url(self, user_id: uuid.UUID, extension: str = "webp") -> dict[str, str]:
         file_key = f"pfp/{user_id}/{uuid7().hex}.{extension}"
 
-        # Ссылка подписывается локально, без запроса в хранилище, поэтому ошибки здесь
-        # не ловим: если она случилась, это неверная настройка, и её должно быть видно.
         async with self._get_client() as s3_client:
             presigned_url = await s3_client.generate_presigned_url(
                 ClientMethod="put_object",

@@ -44,6 +44,6 @@ class AchievementsRepository:
         return result.scalar_one_or_none()
 
     async def get_habits_count(self, user_id: uuid.UUID):
-        stmt = select(func.count(Habit)).where(Habit.creator_id == user_id)
+        stmt = select(func.count(Habit.id)).where(Habit.creator_id == user_id)
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()

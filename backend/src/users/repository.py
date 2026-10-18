@@ -3,8 +3,10 @@ from datetime import UTC, datetime
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import joinedload, selectinload
-
+from sqlalchemy.orm import selectinload
+from sqlalchemy import and_, delete, or_, select, update
+from src.social.enums import RelationStatus
+from src.social.models import UserRelation
 from src.users.models import RefreshToken, User, UserAchievement
 
 
@@ -14,7 +16,7 @@ class UsersRepository:
 
     async def _commit(self):
         await self.session.commit()
-    
+
     async def _rollback(self):
         await self.session.rollback()
 
@@ -22,6 +24,7 @@ class UsersRepository:
         new_user = User(username=username, password_hash=password_hash, email=email, achievements=[])
         self.session.add(new_user)
         await self.session.commit()
+
         return new_user
 
     async def get_user_by_id(self, user_id: uuid.UUID) -> User | None:
@@ -30,6 +33,7 @@ class UsersRepository:
             .where(User.id == user_id)
             .options(selectinload(User.achievements).joinedload(UserAchievement.achievement))
         )
+
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
@@ -47,7 +51,6 @@ class UsersRepository:
         stmt = select(User).where(User.telegram_link_token_hash == token_hash)
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
-
 
     async def get_user_by_telegram_chat_id(self, chat_id: int) -> User | None:
         stmt = select(User).where(User.telegram_chat_id == chat_id)
@@ -103,16 +106,30 @@ class UsersRepository:
         user_id: uuid.UUID,
         user_data_dict: dict,
     ):
-        stmt = (
-            update(User)
-            .where(User.id == user_id)
-            .values(
-                **user_data_dict
-            )
-            .returning(User)
-            .options(selectinload(User.achievements).joinedload(UserAchievement.achievement))
-        )
+        stmt = update(User).where(User.id == user_id).values(**user_data_dict).returning(User)
         result = await self.session.execute(stmt)
         await self._commit()
         return result.scalar_one_or_none()
 
+    async def search_users(self, query: str, exclude_user_id: uuid.UUID, limit: int) -> list[User]:
+        # экранирование
+        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        blocked = select(UserRelation.id).where(
+            UserRelation.status == RelationStatus.BLOCKED,
+            or_(
+                and_(UserRelation.user_id == exclude_user_id, UserRelation.target_id == User.id),
+                and_(UserRelation.target_id == exclude_user_id, UserRelation.user_id == User.id),
+            ),
+        )
+        stmt = (
+            select(User)
+            .where(
+                User.id != exclude_user_id,
+                User.username.ilike(f"%{escaped}%", escape="\\"),
+                ~blocked.exists(),
+            )
+            .order_by(User.username)
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())

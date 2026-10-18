@@ -85,8 +85,15 @@ async def chat_websocket(websocket: WebSocket) -> None:
     try:
         # == ЦИКЛ ОБРАБОТКИ СОБЫТИЙ ==
         while True:
-            raw = await websocket.receive_json()
-            await _handle_event(user_id, raw, websocket)
+            try:
+                raw = await websocket.receive_json()
+                if not isinstance(raw, dict):
+                    raise ValueError
+                await _handle_event(user_id, raw, websocket)
+            except WebSocketDisconnect:
+                raise
+            except Exception:
+                await websocket.send_json(WSErrorOut(detail="Некорректное событие").model_dump())
     except WebSocketDisconnect:
         pass
     finally:

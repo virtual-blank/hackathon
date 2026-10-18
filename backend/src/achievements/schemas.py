@@ -10,7 +10,7 @@ class AchievementOutputSchema(BaseModel):
     rule_type: RuleTypeEnum
     rule_value: int
     color_hex: str
-    requierement: str
+    requirement: str
     description: str
     icon_url: str
 

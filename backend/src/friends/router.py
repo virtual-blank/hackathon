@@ -1,8 +1,9 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query, status
-
+from fastapi import APIRouter, HTTPException, Query, status, BackgroundTasks
+from src.social.enums import RelationStatus
+from src.achievements.service import AchievementsService
 from src.auth.deps import CurrentUserIdDep, SessionDep
 from src.exceptions.friends_exceptions import FriendsConflictError, FriendsNotFoundError
 from src.friends.schemas import FriendRequestsSchema, FriendSchema, RelationStatusSchema
@@ -33,9 +34,13 @@ async def get_requests(user_id: CurrentUserIdDep, session: SessionDep, limit: Li
     response_model=RelationStatusSchema,
     description="Отправить заявку. Если от этого пользователя уже есть встречная — она принимается",
 )
-async def send_request(target_id: uuid.UUID, user_id: CurrentUserIdDep, session: SessionDep):
+async def send_request(target_id: uuid.UUID, user_id: CurrentUserIdDep, session: SessionDep, bt: BackgroundTasks):
     try:
-        return await FriendsService(session=session).send_request(user_id=user_id, target_id=target_id)
+        result = await FriendsService(session=session).send_request(user_id=user_id, target_id=target_id)
+        if result.status == RelationStatus.ACCEPTED:
+            bt.add_task(AchievementsService.process_achievements_friends_bt, user_id=user_id)
+            bt.add_task(AchievementsService.process_achievements_friends_bt, user_id=target_id)
+        return result
     except FriendsNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except FriendsConflictError as exc:
@@ -74,9 +79,12 @@ async def block_user(target_id: uuid.UUID, user_id: CurrentUserIdDep, session: S
     response_model=RelationStatusSchema,
     description="Принять входящую заявку",
 )
-async def accept_request(sender_id: uuid.UUID, user_id: CurrentUserIdDep, session: SessionDep):
+async def accept_request(sender_id: uuid.UUID, user_id: CurrentUserIdDep, session: SessionDep, bt: BackgroundTasks):
     try:
-        return await FriendsService(session=session).accept_request(user_id=user_id, sender_id=sender_id)
+        result = await FriendsService(session=session).accept_request(user_id=user_id, sender_id=sender_id)
+        bt.add_task(AchievementsService.process_achievements_friends_bt, user_id=user_id)
+        bt.add_task(AchievementsService.process_achievements_friends_bt, user_id=sender_id)
+        return result
     except FriendsNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 

@@ -1,6 +1,7 @@
 import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
+from database.db import async_session_factory
 
 from src.achievements.models import RuleTypeEnum
 from src.achievements.repository import AchievementsRepository
@@ -61,3 +62,38 @@ class AchievementsService:
             new_achievement = await self.repo.set_achievement(user_id=user_id, achievement_id=achievement_id)
             if new_achievement:
                 print(f"выдана новая ачивка {achievement_id} для user_id: {user_id}")
+
+    @staticmethod
+    async def process_achievements_task_bt(
+        user_id: uuid.UUID,
+        streak_days: int,
+    ):
+        async with async_session_factory() as session:
+            try:
+                ach_srvice = AchievementsService(session=session)
+                result = await ach_srvice.check_streak_achievements(user_id=user_id, streak_days=streak_days)
+                await session.commit()
+                return result
+            except Exception:
+                await session.rollback()
+                raise
+
+    @staticmethod
+    async def process_achievements_habits_bt(user_id: uuid.UUID):
+        async with async_session_factory() as session:
+            try:
+                ach_service = AchievementsService(session=session)
+                return await ach_service.check_total_habits_count_achievements(user_id=user_id)
+            except Exception:
+                await session.rollback()
+                raise
+
+    @staticmethod
+    async def process_achievements_friends_bt(user_id: uuid.UUID):
+        async with async_session_factory() as session:
+            try:
+                ach_service = AchievementsService(session=session)
+                return await ach_service.check_total_friends_achievements(user_id=user_id)
+            except Exception:
+                await session.rollback()
+                raise

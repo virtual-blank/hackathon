@@ -33,26 +33,20 @@ class Habit(Uuid7PkMixin, TimeStampMixin, Base):
     creator_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     title: Mapped[str] = mapped_column(String(100))
 
-    # формат проверяет Pydantic
     color_hex: Mapped[str] = mapped_column(String(7), default="#4F46E5", server_default="#4F46E5")
 
     current_streak_days: Mapped[int] = mapped_column(Integer, server_default="0", default=0)
+    streak_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     max_streak_days: Mapped[int] = mapped_column(Integer, server_default="0", default=0)
 
-    # По умолчанию FRIENDS: так не-друзья ничего не видят.
     visibility: Mapped[Visibility] = mapped_column(
         str_enum(Visibility), default=Visibility.FRIENDS, server_default=Visibility.FRIENDS.value
     )
 
-    # Первый день отсчёта: сегодня в часовом поясе создателя. Без default, ставит сервис.
     start_date: Mapped[date] = mapped_column(Date)
 
-    # До 3 напоминаний, время в часовом поясе пользователя.
     notification_times: Mapped[list[time]] = mapped_column(ARRAY(Time), default=list, server_default=text("'{}'"))
 
-    # Когда ушло последнее напоминание. По одному этому полю определяем, какие из слотов
-    # за сегодня уже отправлены (слот отправлен, если last_reminded_at >= время слота).
-    # В v1 напоминания получает только создатель.
     last_reminded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     creator: Mapped["User"] = relationship(back_populates="habits")

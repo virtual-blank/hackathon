@@ -30,6 +30,7 @@ class UserRelation(Uuid7PkMixin, TimeStampMixin, Base):
       - заявка A->B запрещена, если есть blocked в любую сторону;
       - если B->A pending уже существует, заявка A->B подтверждает дружбу.
     """
+
     __tablename__ = "user_relations"
 
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
@@ -45,7 +46,6 @@ class UserRelation(Uuid7PkMixin, TimeStampMixin, Base):
         foreign_keys=[target_id],
     )
 
-
     __table_args__ = (
         UniqueConstraint("user_id", "target_id"),
         CheckConstraint("user_id <> target_id", name="no_self_relation"),
@@ -59,16 +59,14 @@ class Message(Uuid7PkMixin, TimeStampMixin, Base):
     они берутся из shared_habit_users со статусом pending.
     UUIDv7 растёт со временем, поэтому id годится для сортировки и курсорной пагинации.
     """
+
     __tablename__ = "messages"
 
     sender_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     receiver_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     content: Mapped[str] = mapped_column(Text)  # длину (до 2000) проверяет Pydantic
 
-    # Прочитано ли получателем. По умолчанию — нет.
-    # Индекс нужен для быстрого запроса «непрочитанные от данного юзера».
     is_read: Mapped[bool] = mapped_column(default=False, server_default=text("false"), index=True)
-    # Когда прочитано. NULL — если ещё не читали.
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     sender: Mapped["User"] = relationship(
@@ -81,8 +79,4 @@ class Message(Uuid7PkMixin, TimeStampMixin, Base):
         foreign_keys=[receiver_id],
     )
 
-
-    __table_args__ = (
-        Index("ix_messages_dialog", "sender_id", "receiver_id", "id"),
-    )
-    
+    __table_args__ = (Index("ix_messages_dialog", "sender_id", "receiver_id", "id"),)

@@ -26,7 +26,7 @@ class User(Uuid7PkMixin, TimeStampMixin, Base):
     # Настройки (вместо отдельной таблицы users_settings)
     theme: Mapped[Theme] = mapped_column(str_enum(Theme), default=Theme.SYSTEM, server_default=Theme.SYSTEM.value)
 
-    #todo: добавить позже:
+    # todo: добавить позже:
     # timezone: Mapped[TimezoneEnum] = mapped_column(server_default=TimezoneEnum.UTC)
     timezone: Mapped[str] = mapped_column(String(64), server_default="UTC")
 

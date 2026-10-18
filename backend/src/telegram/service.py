@@ -26,12 +26,8 @@ class TelegramService:
         code = secrets.token_urlsafe(32)
         code_hash = hashlib.sha256(code.encode()).hexdigest()
 
-        
-        expires_at = datetime.now(timezone.utc) + timedelta(
-            minutes=settings.link_ttl_minutes
-        )
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=settings.link_ttl_minutes)
 
-        
         user.telegram_link_token_hash = code_hash
         user.telegram_link_expires_at = expires_at
         await self.session.commit()
@@ -44,7 +40,6 @@ class TelegramService:
 
         code_hash = hashlib.sha256(code.encode()).hexdigest()
 
-        
         user = await self.repo.get_user_by_telegram_hash(token_hash=code_hash)
         if user is None:
             raise ValueError("Ссылка недействительна")
@@ -56,7 +51,6 @@ class TelegramService:
         if existing is not None and existing.id != user.id:
             raise ValueError("Этот Telegram уже привязан к другому аккаунту")
 
-       
         user.telegram_chat_id = chat_id
         user.telegram_link_token_hash = None
         user.telegram_link_expires_at = None
@@ -75,6 +69,7 @@ class TelegramService:
         if not ok:
             logger.warning(
                 "Не удалось отправить напоминание chat_id=%s habit=%s",
-                chat_id, habit_title,
+                chat_id,
+                habit_title,
             )
         return ok

@@ -1,8 +1,8 @@
 import uuid
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from src.habits.enums import Visibility
 
@@ -52,6 +52,14 @@ class HabitOutputSchema(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    @classmethod
+    def from_habit(cls, habit) -> "HabitOutputSchema":
+        out = cls.model_validate(habit)
+        expires = habit.streak_expires_at
+        if out.current_streak_days and (expires is None or expires <= datetime.now(timezone.utc)):
+            out.current_streak_days = 0
+        return out
+
 
 class HabitLogOutputSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -64,5 +72,6 @@ class HabitLogOutputSchema(BaseModel):
 
 
 class MarkedHabitOutputSchema(BaseModel):
-    log: HabitLogOutputSchema
+    is_completed: bool
+    log: HabitLogOutputSchema | None = None
     habit: HabitOutputSchema

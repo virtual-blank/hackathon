@@ -23,14 +23,12 @@ class FriendsService:
 
         statuses = {relation.status for relation in relations}
         if RelationStatus.BLOCKED in statuses:
-            # Кто кого заблокировал, не уточняем: о чужой блокировке пользователю знать не нужно.
             raise FriendsConflictError("Нельзя отправить заявку этому пользователю")
         if RelationStatus.ACCEPTED in statuses:
             raise FriendsConflictError("Вы уже друзья")
 
         incoming = self._find(relations, sender_id=target_id, status=RelationStatus.PENDING)
         if incoming is not None:
-            # Встречная заявка уже лежит — значит, оба согласны, сразу дружим.
             incoming.status = RelationStatus.ACCEPTED
             await self.session.commit()
             return RelationStatusSchema(status=RelationStatus.ACCEPTED)
@@ -42,7 +40,6 @@ class FriendsService:
         try:
             await self.session.commit()
         except IntegrityError as exc:
-            # Такой же запрос успел пройти между нашей проверкой и вставкой — сработал unique (user_id, target_id).
             await self.session.rollback()
             raise FriendsConflictError("Заявка уже отправлена") from exc
         return RelationStatusSchema(status=RelationStatus.PENDING)
@@ -70,7 +67,6 @@ class FriendsService:
         await self._check_target(user_id=user_id, target_id=target_id)
         relations = await self.repo.get_pair_relations(user_id, target_id)
 
-        # Заявка и дружба разрываются; встречную блокировку не трогаем — она чужая.
         for relation in relations:
             if relation.status != RelationStatus.BLOCKED:
                 await self.repo.delete_relation(relation)

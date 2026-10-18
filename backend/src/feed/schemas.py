@@ -16,7 +16,7 @@ class ReviewCreateSchema(BaseModel):
 
 class ReviewUpdateSchema(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
-    habit_id: uuid.UUID
+    habit_id: uuid.UUID | None = None
     comment: str | None = None
     rate: Annotated[int, Field(ge=0, le=1)] | None = None
 
@@ -51,7 +51,8 @@ class HabitFeedLogOutputSchema(BaseModel):
 
 
 class FeedOutputSchema(BaseModel):
+    creator: Reviewer
     habit: HabitOutputSchema
     total_logs_count: int
-    habit_logs: list[HabitFeedLogOutputSchema]  # не забыть в бд: макс 90 записей
+    habit_logs: list[HabitFeedLogOutputSchema]
     reviews: list[ReviewOutputSchema] = []

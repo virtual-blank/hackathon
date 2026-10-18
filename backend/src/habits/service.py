@@ -18,6 +18,18 @@ from src.habits.schemas import (
 from src.social.enums import RelationStatus
 from src.users.models import User
 
+
+def calc_streaks(dates: list[date], tz: ZoneInfo) -> tuple[int, int, datetime | None]:
+    if not dates:
+        return 0, 0, None
+    run = best = 1
+    for prev, cur in zip(dates, dates[1:]):
+        run = run + 1 if (cur - prev).days == 1 else 1
+        best = max(best, run)
+    expires = datetime.combine(dates[-1] + timedelta(days=2), datetime.min.time(), tzinfo=tz)
+    return run, best, expires
+
+
 class HabitLogService:
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -47,13 +59,13 @@ class HabitLogService:
         return HabitLogOutputSchema.model_validate(log)
 
     async def get_logs_in_range(
-            self,
-            user_id: uuid.UUID,
-            date_from: date,
-            date_to: date,
-            habit_id: uuid.UUID | None = None,
-            limit: int = 50,
-            offset: int = 0,
+        self,
+        user_id: uuid.UUID,
+        date_from: date,
+        date_to: date,
+        habit_id: uuid.UUID | None = None,
+        limit: int = 50,
+        offset: int = 0,
     ):
         logs = await self.repo.get_logs_in_range(
             user_id=user_id,
@@ -65,38 +77,13 @@ class HabitLogService:
         )
         return [HabitLogOutputSchema.model_validate(log) for log in logs]
 
-
     async def get_completed_habits_by_date(self, user_id: uuid.UUID, target_date: date):
         completed_habits = await self.repo.get_completed_habits_by_date(user_id=user_id, target_date=target_date)
-        return [HabitOutputSchema.model_validate(completed_habit) for completed_habit in completed_habits]
-
+        return [HabitOutputSchema.from_habit(completed_habit) for completed_habit in completed_habits]
 
     async def get_uncompleted_habits_by_date(self, user_id: uuid.UUID, target_date: date):
         uncompleted_habits = await self.repo.get_uncompleted_habits_by_date(user_id=user_id, target_date=target_date)
-        return [HabitOutputSchema.model_validate(uncompleted_habit) for uncompleted_habit in uncompleted_habits]
-
-
-    # async def delete_log(self, user_id: uuid.UUID, log_id: uuid.UUID):
-    #     return await self.repo.delete_log(user_id=user_id, log_id=log_id)
-
-    # async def remove_completion(self, user_id: uuid.UUID, habit_id: uuid.UUID, completed_date: date | None = None):
-    #     user = await self.session.get(User, user_id)
-    #     if user is None:
-    #         raise ValueError("Пользователь не найден")
-    #     if not user.timezone:
-    #         raise ValueError("Часовой пояс пользователя не указан")
-    #
-    #     try:
-    #         user_timezone = ZoneInfo(user.timezone)
-    #     except ZoneInfoNotFoundError:
-    #         raise ValueError("Некорректный часовой пояс пользователя")
-    #
-    #     date_today = datetime.now(user_timezone).date()
-    #     if completed_date is None:
-    #         completed_date = date_today
-    #
-    #     log = await self.repo.remove_completion(user_id=user_id, habit_id=habit_id, completed_date=completed_date)
-    #     return log
+        return [HabitOutputSchema.from_habit(uncompleted_habit) for uncompleted_habit in uncompleted_habits]
 
 
 class HabitsService:
@@ -119,24 +106,24 @@ class HabitsService:
             start_date=start_date,
             notification_times=habit_data.notification_times,
         )
-        return HabitOutputSchema.model_validate(habit)
+        return HabitOutputSchema.from_habit(habit)
 
     async def get_habit(self, user_id: uuid.UUID, habit_id: uuid.UUID):
         habit = await self.habit_repo.get_habit_by_id(habit_id=habit_id, creator_id=user_id)
         if habit is None:
             return None
-        return HabitOutputSchema.model_validate(habit)
+        return HabitOutputSchema.from_habit(habit)
 
     async def get_habits(
-            self,
-            user_id: uuid.UUID,
-            visibility: list[Visibility] | None = None,
-            target_user_id: uuid.UUID | None = None,
-            start_date: date | None = None,
-            end_date: date | None = None,
-            status: str | None = None,
-            limit: int = 50,
-            offset: int = 0,
+        self,
+        user_id: uuid.UUID,
+        visibility: list[Visibility] | None = None,
+        target_user_id: uuid.UUID | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
     ):
         if target_user_id is None or target_user_id == user_id:
             target_user_id = user_id
@@ -167,7 +154,7 @@ class HabitsService:
             limit=limit,
             offset=offset,
         )
-        return [HabitOutputSchema.model_validate(habit) for habit in habits]
+        return [HabitOutputSchema.from_habit(habit) for habit in habits]
 
     async def update_habit(self, user_id: uuid.UUID, habit_id: uuid.UUID, habit_data: HabitUpdateSchema):
         updates = habit_data.model_dump(exclude_unset=True)
@@ -180,39 +167,54 @@ class HabitsService:
         if habit is None:
             return None
 
-        return HabitOutputSchema.model_validate(habit)
+        return HabitOutputSchema.from_habit(habit)
 
     async def delete_habit(self, user_id: uuid.UUID, habit_id: uuid.UUID):
         return await self.habit_repo.delete_habit(habit_id=habit_id, creator_id=user_id)
 
-    async def mark_habit(self, habit_id: uuid.UUID, current_user: User):
-
+    async def mark_habit(self, habit_id: uuid.UUID, current_user: User) -> MarkedHabitOutputSchema:
         habit = await self.session.get(Habit, habit_id)
         if not habit:
             raise ValueError("Привычка не найдена")
 
-        tz = ZoneInfo(current_user.timezone)
+        if not await self.habit_log_repo._user_can_log_habit(user_id=current_user.id, habit=habit):
+            raise ValueError("Привычка не найдена")
+
+        tz = ZoneInfo(current_user.timezone or "UTC")
         today_date = datetime.now(tz).date()
-        yesterday_date = today_date - timedelta(days=1)
+
+        existing_log = await self.habit_log_repo.get_log_by_date(
+            user_id=current_user.id, habit_id=habit_id, completed_date=today_date
+        )
+
+        if existing_log is not None:
+            await self.habit_log_repo.delete_log_instance(existing_log)
+            updated_habit_dao = await self._recalc_streaks(habit)
+            return MarkedHabitOutputSchema(
+                is_completed=False,
+                log=None,
+                habit=HabitOutputSchema.from_habit(updated_habit_dao),
+            )
 
         new_log_dao = await self.habit_log_repo.mark_completed(
             user_id=current_user.id, habit_id=habit_id, completed_date=today_date
         )
-
-        yesterday_logs = await self.habit_log_repo.get_logs_in_range(
-            user_id=current_user.id, date_from=yesterday_date, date_to=yesterday_date, habit_id=habit_id
+        updated_habit_dao = await self._recalc_streaks(habit)
+        return MarkedHabitOutputSchema(
+            is_completed=True,
+            log=HabitLogOutputSchema.model_validate(new_log_dao),
+            habit=HabitOutputSchema.from_habit(updated_habit_dao),
         )
-        if not yesterday_logs:
-            new_streak = 1
-        else:
-            new_streak = habit.current_streak_days + 1
 
-        new_max_streak = max(habit.max_streak_days, new_streak)
-
-        updated_habit_dao = await self.habit_repo.update_habit(
-            habit_id=habit_id,
+    async def _recalc_streaks(self, habit: Habit) -> Habit:
+        creator = await self.session.get(User, habit.creator_id)
+        tz = ZoneInfo(creator.timezone or "UTC")
+        dates = await self.habit_log_repo.get_log_dates(user_id=habit.creator_id, habit_id=habit.id)
+        current, best, expires = calc_streaks(dates, tz)
+        return await self.habit_repo.update_streak(
+            habit_id=habit.id,
             creator_id=habit.creator_id,
-            updates={"current_streak_days": new_streak, "max_streak_days": new_max_streak},
+            current_streak_days=current,
+            max_streak_days=best,
+            streak_expires_at=expires,
         )
-        return MarkedHabitOutputSchema(log=new_log_dao, habit=updated_habit_dao)
-

@@ -1,6 +1,13 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
+import asyncio
+import contextlib
+from contextlib import asynccontextmanager
+
+from core.config import get_telegram_settings
+from src.telegram import client as tg_client
+from src.telegram.reminders import reminders_loop
 
 # == MODELS ==
 from src.users.models import User, UserAchievement
@@ -21,15 +28,31 @@ from src.telegram.router import router as telegram_router
 from src.social.ws import router as social_ws_router
 # == ROUTERS ==
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings = get_telegram_settings()
+    if settings.webhook_url:
+        await tg_client.set_webhook(settings.webhook_url)
+
+    reminders_task = asyncio.create_task(reminders_loop())
+    try:
+        yield
+    finally:
+        reminders_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await reminders_task
+
+
 ROUTERS_PREFIX = "/api/v1"
 
 app = FastAPI(
     title="Hackathon API",
-    version="0.1.0",
+    version="1.1.0",
     description="API для приложения трекинга привычек",
+    lifespan=lifespan,
 )
 
-# CORS — на хакатоне открываем всё, чтобы фронт с любого порта ходил
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
