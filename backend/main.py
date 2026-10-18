@@ -2,12 +2,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import asyncio
-import contextlib
 from contextlib import asynccontextmanager
 
 from core.config import get_telegram_settings
 from src.telegram import client as tg_client
-from src.telegram.reminders import reminders_loop
+from src.notifications.scheduler import start_scheduler, stop_scheduler
 
 # == MODELS ==
 from src.users.models import User, UserAchievement
@@ -35,13 +34,11 @@ async def lifespan(app: FastAPI):
     if settings.webhook_url:
         await tg_client.set_webhook(settings.webhook_url)
 
-    reminders_task = asyncio.create_task(reminders_loop())
+    start_scheduler()
     try:
         yield
     finally:
-        reminders_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await reminders_task
+        stop_scheduler()
 
 
 ROUTERS_PREFIX = "/api/v1"
