@@ -20,6 +20,7 @@ uuid6 = ">=2025.0.1"
 aioboto3 = "^15.5.0"
 tzdata = "^2026.5"
 plotly = "^5.24.1"
+apscheduler = "^3.11.3"
 
 
 [tool.poetry.group.dev.dependencies]
