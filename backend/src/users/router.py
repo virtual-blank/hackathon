@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, HTTPException, status, Query
 
 from src.auth.deps import CurrentUserDep, CurrentUserIdDep, SessionDep
@@ -20,6 +22,8 @@ from src.exceptions.user_exceptions import (
     DataFormatError,
 )
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/users", tags=["👤 Users"])
 
 
@@ -32,6 +36,7 @@ async def sign_up(user_data: UserCreateSchema, session: SessionDep):
     except UsernameTakenError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except Exception:
+        logger.exception("Не удалось зарегистрировать пользователя")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
 
@@ -44,6 +49,7 @@ async def login(user_data: UserLoginSchema, session: SessionDep):
     except IncorrectPassword as e:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
     except Exception:
+        logger.exception("Не удалось выполнить вход")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
 
@@ -58,8 +64,8 @@ async def logout(user: CurrentUserDep, session: SessionDep):
     service = UsersService(session=session)
     try:
         await service.logout(user_id=user.id)
-    except Exception as e:
-        print(e)
+    except Exception:
+        logger.exception("Не удалось отозвать refresh-токены user_id=%s", user.id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal Server Error",
@@ -82,8 +88,9 @@ async def refresh(payload: RefreshTokenSchema, session: SessionDep):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
     except UserNotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
-    except Exception as e:
-        print(e)
+    except Exception:
+        # Сам токен не логируем: по нему можно получить чужой access
+        logger.exception("Не удалось обновить access-токен по refresh-токену")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal Server Error",
@@ -102,8 +109,8 @@ async def delete_account(user: CurrentUserDep, session: SessionDep):
         await service.delete_account(user_id=user.id)
     except UserNotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
-    except Exception as e:
-        print(e)
+    except Exception:
+        logger.exception("Не удалось удалить аккаунт user_id=%s", user.id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal Server Error",
@@ -118,6 +125,7 @@ async def get_me(current_user_id: CurrentUserIdDep, session: SessionDep):
     try:
         return await service.get_me(user_id=current_user_id)
     except Exception:
+        logger.exception("Не удалось получить профиль user_id=%s", current_user_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal Server Error",
@@ -141,6 +149,7 @@ async def edit_profile(current_user: CurrentUserDep, session: SessionDep, user_d
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
 
     except Exception:
+        logger.exception("Не удалось обновить профиль user_id=%s", current_user.id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal Server Error",
@@ -161,6 +170,7 @@ async def change_password(
     except IncorrectPassword as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except Exception:
+        logger.exception("Не удалось сменить пароль user_id=%s", current_user_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal Server Error",
@@ -184,4 +194,5 @@ async def search_users(
     try:
         return await service.search_users(current_user_id=current_user_id, query=username, limit=limit)
     except Exception:
+        logger.exception("Не удалось найти пользователей user_id=%s", current_user_id)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")

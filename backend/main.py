@@ -5,6 +5,7 @@ import asyncio
 from contextlib import asynccontextmanager
 
 from core.config import get_telegram_settings
+from core.logger import logging_config, setup_logging
 from src.telegram import client as tg_client
 from src.notifications.scheduler import start_scheduler, stop_scheduler
 
@@ -28,6 +29,10 @@ from src.social.ws import router as social_ws_router
 from src.analytics.router import router as analytics_router
 from src.exports.router import router as exports_router
 # == ROUTERS ==
+
+# На уровне модуля, а не в lifespan: `fastapi dev` и `uvicorn --reload`
+# импортируют main.py в процессе-воркере, и настройка должна случиться там.
+setup_logging()
 
 
 @asynccontextmanager
@@ -79,4 +84,4 @@ async def health() -> dict[str, str]:
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="127.0.0.1", port=8080, reload=True)
+    uvicorn.run("main:app", host="127.0.0.1", port=8080, reload=True, log_config=logging_config())

@@ -1,3 +1,4 @@
+import logging
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -5,6 +6,8 @@ from fastapi import APIRouter, HTTPException, Query, status
 from src.auth.deps import CurrentUserIdDep, SessionDep
 from src.social.schemas import MessageCreateSchema, MessageOutputSchema
 from src.social.service import SocialService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/social", tags=["💬 Social"])
 
@@ -27,7 +30,7 @@ async def send_message(payload: MessageCreateSchema, user_id: CurrentUserIdDep, 
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
     except Exception as e:
-        print(e)
+        logger.exception("Не удалось отправить сообщение user_id=%s receiver_id=%s", user_id, payload.receiver_id)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error") from e
 
 
@@ -56,5 +59,5 @@ async def get_history(
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
     except Exception as e:
-        print(e)
+        logger.exception("Не удалось получить историю диалога user_id=%s peer_id=%s", user_id, peer_id)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error") from e

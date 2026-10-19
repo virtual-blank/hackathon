@@ -24,8 +24,8 @@ async def generate_telegram_link(user: CurrentUserDep, session: SessionDep):
     service = TelegramService(session=session)
     try:
         url = await service.generate_link(user=user)
-    except Exception as e:
-        print(e)
+    except Exception:
+        logger.exception("Не удалось сгенерировать ссылку привязки Telegram user_id=%s", user.id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal Server Error",

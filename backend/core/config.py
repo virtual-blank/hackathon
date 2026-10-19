@@ -1,8 +1,10 @@
 from functools import lru_cache
 from pathlib import Path
-
+from typing import Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
+Log_Level = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 ENV_FILE = BASE_DIR / ".env"
 
@@ -27,6 +29,7 @@ class JwtSettings(BaseSettings):
     algorithm: str
     refresh_token_expire_days: int = 30
 
+
 class MinioSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=ENV_FILE, env_prefix="MINIO_", extra="ignore")
     host: str
@@ -41,16 +44,30 @@ class MinioSettings(BaseSettings):
     def endpoint(self) -> str:
         return f"{self.protocol}://{self.host}:{self.port}"
 
+
 class TelegramSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=ENV_FILE, env_prefix="TELEGRAM_", extra="ignore")
     bot_token: str
     bot_name: str
-    webhook_url: str = ""    #заполню позже
+    webhook_url: str = ""  # заполню позже
     link_ttl_minutes: int = 15
+
+
+class LoggerSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=ENV_FILE, env_prefix="LOG_", extra="ignore")
+    format: str = "%(asctime)s [%(levelname)s] %(name)s - %(message)s"
+    level: Log_Level = "DEBUG"
+
+
+@lru_cache
+def get_logger_settings() -> LoggerSettings:
+    return LoggerSettings()
+
 
 @lru_cache
 def get_telegram_settings() -> TelegramSettings:
     return TelegramSettings()
+
 
 @lru_cache
 def get_db_settings() -> PostgresSettings:
