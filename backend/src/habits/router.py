@@ -1,4 +1,5 @@
 import uuid
+import logging
 from datetime import date
 from typing import Literal
 
@@ -15,6 +16,7 @@ from src.habits.schemas import (
 )
 from src.habits.service import HabitLogService, HabitsService
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/habits", tags=["🏃 Habits"])
 
 
@@ -38,8 +40,8 @@ async def create_habit(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-    except Exception as e:
-        print(e)
+    except Exception:
+        logger.exception("Не удалось создать привычку")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal Server Error",
@@ -77,6 +79,7 @@ async def get_habits(
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception:
+        logger.exception("Не удалось получить список привычек")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
 
@@ -109,6 +112,7 @@ async def get_logs_in_range(
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception:
+        logger.exception("Не удалось получить записи о выполнении привычек")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
 
@@ -126,6 +130,7 @@ async def get_completed_habits(user_id: CurrentUserIdDep, target_date: date, ses
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception:
+        logger.exception("Не удалось получить список выполненных привычек")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
 
@@ -143,6 +148,7 @@ async def get_uncompleted_habits(user_id: CurrentUserIdDep, target_date: date, s
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception:
+        logger.exception("Не удалось получить список невыполненных привычек")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
 
@@ -164,6 +170,7 @@ async def get_habit(user_id: CurrentUserIdDep, habit_id: uuid.UUID, session: Ses
     except HTTPException:
         raise
     except Exception:
+        logger.exception("Не удалось получить привычку")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
 
@@ -190,6 +197,7 @@ async def update_habit(user_id: CurrentUserIdDep, habit_id: uuid.UUID, data: Hab
     except HTTPException:
         raise
     except Exception:
+        logger.exception("Не удалось обновить привычку")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
 
@@ -208,6 +216,7 @@ async def delete_habit(user_id: CurrentUserIdDep, habit_id: uuid.UUID, session: 
     except HTTPException:
         raise
     except Exception:
+        logger.exception("Не удалось удалить привычку")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
 
@@ -232,4 +241,5 @@ async def mark_habit(current_user: CurrentUserDep, session: SessionDep, habit_id
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception:
+        logger.exception("Не удалось отметить выполнение привычки")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")

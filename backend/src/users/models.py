@@ -24,7 +24,7 @@ class User(Uuid7PkMixin, TimeStampMixin, Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     pfp_url: Mapped[str | None] = mapped_column(default=None)
     # Настройки (вместо отдельной таблицы users_settings)
-    theme: Mapped[Theme] = mapped_column(str_enum(Theme), default=Theme.SYSTEM, server_default=Theme.SYSTEM.value)
+    theme: Mapped[Theme] = mapped_column(str_enum(Theme), default=Theme.SYSTEM, server_default=Theme.LIGHT.value)
 
     # todo: добавить позже:
     # timezone: Mapped[TimezoneEnum] = mapped_column(server_default=TimezoneEnum.UTC)

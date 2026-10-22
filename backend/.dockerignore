@@ -1,0 +1,45 @@
+# Virtual environments
+.venv
+__pycache__
+*.py[cod]
+*$py.class
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Environment files
+.env
+.env.*
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# Documentation
+*.md
+docs/
+
+# Testing & CI
+tests/
+.pytest_cache
+.coverage
+.tox
+*.log
+
+# Caches
+.mypy_cache
+.ruff_cache
+*.egg-info
+dist/
+build/
+
+# Alembic (keep only migrations, not metadata)
+alembic.ini.bak
+
+# Logs
+logs/

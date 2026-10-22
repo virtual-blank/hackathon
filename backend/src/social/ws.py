@@ -1,3 +1,4 @@
+import logging
 import uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -17,6 +18,7 @@ from src.social.schemas import (
 )
 from src.social.service import SocialService
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -54,6 +56,10 @@ class ConnectionManager:
             try:
                 await websocket.send_json(payload)
             except Exception:
+                logger.exception(
+                    "Ошибка при отправке сообщения WebSocket пользователю user_id=%s",
+                    user_id,
+                )
                 self.disconnect(user_id, websocket)
         return True
 
@@ -93,6 +99,7 @@ async def chat_websocket(websocket: WebSocket) -> None:
             except WebSocketDisconnect:
                 raise
             except Exception:
+                logger.exception("Неожиданная ошибка при обработке события WebSocket")
                 await websocket.send_json(WSErrorOut(detail="Некорректное событие").model_dump())
     except WebSocketDisconnect:
         pass

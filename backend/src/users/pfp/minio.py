@@ -13,14 +13,15 @@ logger = logging.getLogger(__name__)
 STORAGE_ERRORS = (ClientError, BotoCoreError)
 NOT_FOUND_CODE = "404"
 
-MINIO_ENDPOINT = get_minio_settings().endpoint
+MINIO_ENDPOINT = get_minio_settings().endpoint  # Внутренний endpoint для boto-клиента
+MINIO_PUBLIC_URL = get_minio_settings().effective_public_url  # Публичный URL для presigned и префиксов
 BUCKET_NAME = get_minio_settings().bucket_name
 ACCESS_KEY = get_minio_settings().root_user
 SECRET_KEY = get_minio_settings().root_password
 
-PUBLIC_PREFIX = f"{MINIO_ENDPOINT}/{BUCKET_NAME}/"
+PUBLIC_PREFIX = f"{MINIO_PUBLIC_URL}/{BUCKET_NAME}/"
 DEFAULT_PFP_URL = f"{PUBLIC_PREFIX}defaults/default-pfp.webp"
-ACHIEVEMENTS_PREFIX = f"{MINIO_ENDPOINT}/achievements/"
+ACHIEVEMENTS_PREFIX = f"{MINIO_PUBLIC_URL}/achievements/"
 
 
 class MinioService:
@@ -46,6 +47,11 @@ class MinioService:
                 Params={"Bucket": self.bucket_name, "Key": file_key, "ContentType": f"image/{extension}"},
                 ExpiresIn=get_minio_settings().ttl_link_sec,
             )
+        
+        # Заменить внутренний endpoint на публичный URL в presigned link
+        if MINIO_ENDPOINT != MINIO_PUBLIC_URL:
+            presigned_url = presigned_url.replace(MINIO_ENDPOINT, MINIO_PUBLIC_URL)
+        
         public_url = f"{PUBLIC_PREFIX}{file_key}"
         return {"upload_url": presigned_url, "file_key": file_key, "public_url": public_url}
 

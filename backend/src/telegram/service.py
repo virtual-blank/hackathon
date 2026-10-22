@@ -73,3 +73,12 @@ class TelegramService:
                 habit_title,
             )
         return ok
+    
+    async def unlink(self, user: User) -> bool:
+        if user.telegram_chat_id is None:
+            return False
+
+        user.telegram_chat_id = None
+        await self.session.commit()
+        logger.info("Юзер %s отвязал Telegram", user.id)
+        return True

@@ -1,0 +1,53 @@
+services:
+  # ========================================================================
+  # Postgres (не менять: данные в pg_data должны сохраниться)
+  # ========================================================================
+  postgres:
+    image: postgres:16.2-alpine
+    container_name: core_db
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_NAME}
+    ports:
+      - "${POSTGRES_PORT:-5435}:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - app_network
+
+  # ========================================================================
+  # MinIO (не менять: данные в minio_data должны сохраниться)
+  # ========================================================================
+  minio:
+    build:
+      context: ./backend/src/users/pfp
+      dockerfile: Dockerfile
+    image: minio-local:2025-10-15
+    container_name: minio_server
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9000/minio/health/live"\]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - app_network

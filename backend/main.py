@@ -1,10 +1,12 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
+import logging
 import asyncio
 from contextlib import asynccontextmanager
-
+from time import perf_counter
 from core.config import get_telegram_settings
+from core.logger import logging_config, setup_logging
 from src.telegram import client as tg_client
 from src.notifications.scheduler import start_scheduler, stop_scheduler
 
@@ -60,6 +62,35 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+logger = logging.getLogger(__name__)
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start_time = perf_counter()
+
+    try:
+        response = await call_next(request)
+    except Exception:
+        duration = perf_counter() - start_time
+        logger.exception(
+            "Необработанная ошибка HTTP-запроса: method=%s path=%s duration=%.3fs",
+            request.method,
+            request.url.path,
+            duration,
+        )
+        raise
+
+    duration = perf_counter() - start_time
+    logger.warning(
+        "HTTP-запрос: method=%s path=%s status_code=%s duration=%.3fs",
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration,
+    )
+
+    return response
+
 app.include_router(users_router, prefix=ROUTERS_PREFIX)
 app.include_router(feed_router, prefix=ROUTERS_PREFIX)
 app.include_router(users_pfp_router, prefix=ROUTERS_PREFIX)
@@ -79,4 +110,5 @@ async def health() -> dict[str, str]:
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="127.0.0.1", port=8080, reload=True)
+    setup_logging()
+    uvicorn.run("main:app", host="127.0.0.1", port=8080, reload=True, log_config=logging_config())

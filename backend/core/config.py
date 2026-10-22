@@ -34,12 +34,16 @@ class MinioSettings(BaseSettings):
     root_user: str
     root_password: str
     bucket_name: str
+    endpoint: str
+    public_url: str = ""  # Публичный URL для presigned links и префиксов; если пусто, используется endpoint
     protocol: str = "http"
     ttl_link_sec: int = 300
-
+    
     @property
-    def endpoint(self) -> str:
-        return f"{self.protocol}://{self.host}:{self.port}"
+    def effective_public_url(self) -> str:
+        """Возвращает public_url если задан, иначе endpoint (обратная совместимость)"""
+        return self.public_url if self.public_url else self.endpoint
+
 
 class TelegramSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=ENV_FILE, env_prefix="TELEGRAM_", extra="ignore")
@@ -47,6 +51,15 @@ class TelegramSettings(BaseSettings):
     bot_name: str
     webhook_url: str = ""    #заполню позже
     link_ttl_minutes: int = 15
+
+class LoggingSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=ENV_FILE, env_prefix="LOG_", extra="ignore")
+    level: str = "INFO"
+    format: str = "%(asctime)s [%(levelname)s] %(name)s - %(message)s"
+
+@lru_cache
+def get_logging_settings() -> LoggingSettings:
+    return LoggingSettings()
 
 @lru_cache
 def get_telegram_settings() -> TelegramSettings:

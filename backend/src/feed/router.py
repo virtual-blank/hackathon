@@ -1,11 +1,12 @@
 import uuid
-
+import logging
 from fastapi import APIRouter, HTTPException, Query, status
 
 from src.auth.deps import CurrentUserIdDep, SessionDep
 from src.feed.schemas import FeedOutputSchema, ReviewCreateSchema, ReviewOutputSchema, ReviewUpdateSchema
 from src.feed.service import FeedService
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/feed", tags=["👁‍🗨 Feed"])
 
 
@@ -21,6 +22,7 @@ async def get_feed(
     try:
         return await service.get_feed(user_id=current_user_id, limit=limit, offset=offset)
     except Exception:
+        logger.exception("Не удалось получить ленту")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
 
@@ -35,6 +37,7 @@ async def create_review(current_user_id: CurrentUserIdDep, session: SessionDep, 
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except Exception:
+        logger.exception("Не удалось создать отзыв")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
 
@@ -56,6 +59,7 @@ async def edit_review(
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except Exception:
+        logger.exception("Не удалось изменить отзыв")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")
 
 
@@ -68,4 +72,5 @@ async def delete_review(current_user_id: CurrentUserIdDep, session: SessionDep, 
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except Exception:
+        logger.exception("Не удалось удалить отзыв")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal Server Error")

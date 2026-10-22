@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.telegram import client
 from src.telegram.schemas import TelegramWebhookSchema
 from src.telegram.service import TelegramService
+from src.users.repository import UsersRepository
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,8 @@ async def handle_update(update_data: dict, session: AsyncSession) -> None:
         chat_id = message.chat.id
         if text.startswith("/start"):
             await _handle_start(text=text, chat_id=chat_id, session=session)
+        elif text.startswith("/unlink") or text.strip().lower() == "отвязать":
+            await _handle_unlink(chat_id=chat_id, session=session)
         else:
             logger.info("Неизвестная команда от chat_id=%s: %s", chat_id, text)
     except Exception:
@@ -66,4 +69,23 @@ async def _handle_start(text: str, chat_id: int, session: AsyncSession) -> None:
     await client.send_message(
         chat_id=chat_id,
         text="✅ Telegram привязан! Теперь ты будешь получать напоминания о привычках.",
+    )
+
+async def _handle_unlink(chat_id: int, session: AsyncSession) -> None:
+    repo = UsersRepository(session=session)
+    user = await repo.get_user_by_telegram_chat_id(chat_id=chat_id)
+
+    if user is None:
+        await client.send_message(
+            chat_id=chat_id,
+            text="❌ Этот Telegram не привязан ни к одному аккаунту.",
+        )
+        return
+
+    service = TelegramService(session=session)
+    await service.unlink(user=user)
+
+    await client.send_message(
+        chat_id=chat_id,
+        text="✅ Telegram отвязан от аккаунта. Напоминания больше не будут приходить.",
     )

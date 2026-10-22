@@ -21,3 +21,7 @@ wheels/
 
 # dumps
 dmp/
+
+#logs
+/backend/logs/
+wget-log

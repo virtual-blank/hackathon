@@ -1,4 +1,5 @@
 services:
+
   postgres:
     image: postgres:16.2-alpine
     container_name: core_db
@@ -13,7 +14,6 @@ services:
       - "${POSTGRES_PORT:-5435}:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
-
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
@@ -22,29 +22,7 @@ services:
       start_period: 10s
     networks:
       - app_network
- 
-  backend:
-    profiles: ["full"]
-    build:
-      context: ./backend      
-      dockerfile: Dockerfile
-    container_name: fastapi_backend
-    restart: unless-stopped
-    env_file:
-      - .env
-    environment:            
-    - POSTGRES_HOST=postgres
-    ports:
-      - "8000:8000"
-    depends_on:
-      postgres:
-        condition: service_healthy 
-    networks:
-      - app_network
-    volumes:
-      - ./backend:/app/backend    
-      - /app/backend/.venv
- 
+
   minio:
     build:
       context: ./backend/src/users/pfp
@@ -83,13 +61,13 @@ services:
       BUCKET: ${MINIO_BUCKET_NAME}
       ACHIEVEMENTS_BUCKET: achievements
     volumes:
-      - ./frontend/assets/defaults:/defaults:ro
-      - ./frontend/assets/achievements:/achievements:ro
+      - ./frontend/src/assets/defaults:/defaults:ro
+      - ./frontend/src/assets/achievements:/achievements:ro
     networks:
       - app_network
     entrypoint: >
       /bin/sh -c "
-      until mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD; do sleep 1; done &&
+      until mc alias set local http://minio:9000 \"$$MINIO_ROOT_USER\" \"$$MINIO_ROOT_PASSWORD\"; do sleep 1; done &&
       mc mb --ignore-existing local/$$BUCKET &&
       mc anonymous set download local/$$BUCKET/defaults &&
       mc anonymous set download local/$$BUCKET/pfp &&
@@ -99,10 +77,157 @@ services:
       mc mirror --overwrite /achievements local/$$ACHIEVEMENTS_BUCKET
       "
 
+  backend:
+    build:
+      context: ./backend      
+      dockerfile: Dockerfile
+    container_name: fastapi_backend
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - MINIO_HOST=minio
+      - MINIO_PORT=9000
+      - MINIO_ENDPOINT=http://minio:9000
+      # MINIO_PUBLIC_URL берётся из .env (локально http://localhost:9000, на сервере https://домен)
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    networks:
+      - app_network
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    stop_grace_period: 10s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ""
+    container_name: frontend_app
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - app_network
+    ports:
+      - "${FRONTEND_BIND:-127.0.0.1}:${FRONTEND_PORT:-8080}:80"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://localhost:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  cloudflared:
+    image: cloudflare/cloudflared:2024.10.0
+    container_name: cloudflare_tunnel
+    restart: unless-stopped
+    profiles: ["tunnel"]
+    command: tunnel --no-autoupdate run
+    env_file:
+      - .env
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on:
+      frontend:
+        condition: service_healthy
+    networks:
+      - app_network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  seed:
+    profiles: ["seed"]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: seed_runner
+    restart: "no"
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - MINIO_HOST=minio
+      - MINIO_PORT=9000
+      - MINIO_ENDPOINT=http://minio:9000
+      # MINIO_PUBLIC_URL берётся из .env (http://localhost:9000): он попадает в ссылки на аватарки
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      backend:
+        condition: service_healthy
+    networks:
+      - app_network
+    volumes:
+      - ./frontend/src/assets:/frontend/src/assets:ro
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        echo '[seed] Checking if demo data already exists...'
+        cat << 'EOF' > /tmp/check.py
+        import asyncio, asyncpg, os
+        from core.config import get_db_settings
+        async def main():
+            try:
+                conn = await asyncpg.connect(get_db_settings().url.replace('+asyncpg', ''))
+                u1 = os.getenv('SYNTHETIC_USER_1_EMAIL', '')
+                u2 = os.getenv('SYNTHETIC_USER_2_EMAIL', '')
+                val = await conn.fetchval('SELECT count(*) FROM users WHERE email = $1 OR email = $2', u1, u2)
+                print(val)
+                await conn.close()
+            except Exception:
+                print(0)
+        asyncio.run(main())
+        EOF
+        COUNT=$$(python /tmp/check.py)
+        if [ "$$COUNT" -gt 0 ] && [ "$$FORCE_SEED" != "1" ]; then
+          echo "[seed] Demo data already loaded (found $$COUNT users). Skipping."
+          echo "[seed] Set FORCE_SEED=1 to force reload."
+          exit 0
+        fi
+        echo '[seed] Running fill_db...'
+        python -m src.synthetic.fill_db
+        echo '[seed] Done.'
+
 volumes:
   pg_data:
-  minio_data: 
- 
+  minio_data:
+
 networks:
   app_network:
-    driver: bridge
+    driver: bridge 
