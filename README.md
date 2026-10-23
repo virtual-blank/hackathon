@@ -47,14 +47,14 @@ Docker Desktop не обязателен: на macOS достаточно `colim
 Клонирование репозитория:
 
 ```bash
-git clone git@github.com:virtual-blank/hackathon.git
+git clone https://github.com/virtual-blank/hackathon.git
 cd hackathon
 ```
 
-Если SSH-ключ в GitHub не настроен, клонируйте по HTTPS:
+Если у вас настроен SSH-ключ в GitHub, можно клонировать по SSH:
 
 ```bash
-git clone https://github.com/virtual-blank/hackathon.git
+git clone git@github.com:virtual-blank/hackathon.git
 ```
 
 Создание `.env` из шаблона:
