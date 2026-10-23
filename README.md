@@ -33,67 +33,124 @@
 
 - Docker с Docker Compose v2 (проверка: `docker compose version`)
 - Git
+- Свободные порты: `8080` (приложение), `9000` и `9001` (MinIO), `5435` (Postgres)
 
-## Первый запуск
+Docker Desktop не обязателен: на macOS достаточно `colima` (`brew install colima docker docker-compose`, затем `colima start`).
+После установки из Homebrew плагину compose нужен путь в `~/.docker/config.json`:
+
+```json
+{ "cliPluginsExtraDirs": ["/opt/homebrew/lib/docker/cli-plugins"] }
+```
+
+## Подготовка (один раз)
 
 Клонирование репозитория:
+
 ```bash
 git clone git@github.com:virtual-blank/hackathon.git
-```
-```bash
 cd hackathon
 ```
-Заполнение .env
+
+Если SSH-ключ в GitHub не настроен, клонируйте по HTTPS:
+
+```bash
+git clone https://github.com/virtual-blank/hackathon.git
+```
+
+Создание `.env` из шаблона:
+
 ```bash
 cp .env.example .env
 ```
+
+Значения из шаблона подходят для локального запуска как есть — менять ничего не нужно. Этот единственный `.env` читают все сервисы: Postgres, backend, seed и MinIO, поэтому переменные вида `MINIO_PUBLIC_URL` попадают в ссылки на аватарки, а `POSTGRES_*` — в строку подключения.
+
+Скрипт запуска должен быть исполняемым:
+
 ```bash
 chmod +x start.sh
 ```
-Запуск со сгенерированной базой данных (700тыс+):
-```bash
-./start.sh --include-synthetic
-```
-```
-[!] Записи в БД:
-  achievements                10
-  users                    2,889
-  refresh_tokens           4,508
-  reviews                 10,447
-  user_achievements       20,694
-  habits                  12,987
-  user_relations          41,046
-  messages                95,281
-  habit_logs             542,998
-```
-Запуск с пустой базой данных:
+
+## Локальный запуск
+
+Оба сценария используют один и тот же `start.sh`; разница только в флаге. Скрипт делает три вещи: собирает образы, поднимает контейнеры и, если попросили, заливает демо-данные.
+
+### Сценарий 1 — пустая база (только миграции)
+
 ```bash
 ./start.sh
 ```
 
-Первый запуск собирает образы и занимает несколько минут.
+Что происходит по шагам:
 
-Когда в консоли появится `Готово`, откройте в браузере: **http://localhost:8080**
+1. `docker compose up -d --build` — собираются образы и поднимаются `postgres`, `minio`, `backend`, `frontend`.
+2. Backend при старте применяет миграции: `python -m alembic upgrade head` в `backend/docker-entrypoint.sh`, то есть схема БД создаётся автоматически, руками ничего накатывать не нужно.
+3. Демо-данных нет: таблицы пустые. Пользователя нужно создать самому — через форму регистрации в интерфейсе или `POST /api/v1/users/sign-up`.
 
-Флаг `--include-synthetic` заполняет базу демо-данными (пользователи, привычки, друзья, достижения). Без него приложение запустится с пустой базой.
+Подходит, когда нужно посмотреть приложение «с чистого листа» или проверить регистрацию.
+
+### Сценарий 2 — база с демо-данными (миграции + синтетика)
+
+```bash
+./start.sh --include-synthetic
+```
+
+Шаги те же, плюс четвёртый:
+
+4. После того как backend стал `healthy`, запускается разовый контейнер из профиля `seed` (`docker compose --profile seed run --rm --build seed`), который выполняет `python -m src.synthetic.fill_db`. В базу попадают пользователи, привычки, отметки, друзья, переписки, отзывы и достижения — порядка 700 тыс. записей:
+
+```
+[!] Записи в БД:
+  achievements                10
+  users                  ~2,8 тыс.
+  habits                  ~13 тыс.
+  user_relations          ~41 тыс.
+  messages                ~95 тыс.
+  habit_logs             ~535 тыс.
+```
+
+Точные числа зависят от генератора и при каждом заполнении разные.
+
+### Флаги `start.sh`
+
+| Команда | Что делает |
+|---|---|
+| `./start.sh` | миграции + пустая база |
+| `./start.sh --include-synthetic` | миграции + демо-данные |
+| `./start.sh --reset` | стирает тома `pg_data` и `minio_data` (`docker compose down -v`), затем миграции + пустая база |
+| `./start.sh --reset --include-synthetic` | стереть всё и залить демо-данные заново |
+
+- `--reset` комбинируется с `--include-synthetic`, порядок флагов не важен: сначала удаляются данные, потом идёт обычный запуск.
+- Неизвестный флаг скрипт не игнорирует — останавливается с ошибкой и списком допустимых.
+- Повторный запуск с `--include-synthetic` безопасен: если демо-пользователи уже есть, seed пропускается (`Demo data already loaded… Skipping`). Чтобы залить их заново, нужен `--reset`.
+- Первый запуск собирает образы и занимает несколько минут: `poetry install` для backend, `npm ci` и `vite build` для frontend, а MinIO и `mc` собираются из исходников на Go. Повторные запуски используют кэш и занимают секунды.
+
+Когда в консоли появится `Готово: http://localhost:8080` — приложение готово, открывайте **http://localhost:8080**.
 
 ### Демо-пользователи
 
-Логины и пароли задаются в `.env` (переменные `SYNTHETIC_USER_1_*` и `SYNTHETIC_USER_2_*`). Войти можно под любым из них.
+Появляются только после `--include-synthetic`. Логины и пароли задаются в `.env` (`SYNTHETIC_USER_1_*`, `SYNTHETIC_USER_2_*`), по умолчанию:
 
-## Команды
+| Логин | Пароль |
+|---|---|
+| `user_1` | `password` |
+| `user_2` | `password` |
+
+Вход выполняется **по логину (`username`), а не по email** — `POST /api/v1/users/login` с полями `username` и `password`.
+
+## Повседневные команды
+
+Запуск и флаги `start.sh` — в разделе «Локальный запуск» выше. Здесь — что делать с уже запущенным проектом.
 
 | Что нужно | Команда |
 |---|---|
-| Запустить проект (данные сохраняются) | `./start.sh` |
-| Запустить и заполнить демо-данными | `./start.sh --include-synthetic` |
-| Стереть все данные и начать с нуля | `./start.sh --reset --include-synthetic` |
 | Остановить проект (данные сохраняются) | `docker compose down` |
 | Остановить и стереть все данные | `docker compose down -v` |
-| Смотреть логи backend | `docker compose logs -f backend` |
 | Пересобрать после изменения кода | `./start.sh` |
-
-Повторный запуск с `--include-synthetic` безопасен: если демо-данные уже есть, скрипт их пропустит. Чтобы загрузить их заново, используйте `--reset`.
+| Смотреть логи backend | `docker compose logs -f backend` |
+| Смотреть логи всех сервисов | `docker compose logs -f` |
+| Состояние контейнеров | `docker compose ps` |
+| Зайти в psql | `docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_NAME"'` |
 
 ## Адреса
 
